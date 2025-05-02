@@ -78,29 +78,71 @@ fn batch_score_combinations(
 ```rust
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use pldag::{Pldag, Bound};
 
 // Build your PL-DAG (omitting details)...
-let pldag: Pldag = /* ... */;
+// For example, we create a model of three boolean variables x, y and z.
+// We bind them to an xor constraint.
+let mut pldag: Pldag = Pldag::new();
+
+// First setup the primitive variables
+pldag.set_primitive("x".to_string(), (0, 1));
+pldag.set_primitive("y".to_string(), (0, 1));
+pldag.set_primitive("z".to_string(), (0, 1));
+
+// A reference ID is returned
+let root = pldag.set_or(vec![
+    "x".to_string(),
+    "y".to_string(),
+    "z".to_string(),
+], None);
 
 // 1. Validate a combination:
-let inputs: HashMap<String, Bound> = /* leaf assignments */;
-let validity = pldag.check_combination(&inputs);
-println!("Root valid? {}", validity.get("root").copied().unwrap_or(false));
+let mut inputs: IndexMap<String, Bound> = IndexMap::new();
+let validited = pldag.check_combination(&inputs);
+// Since nothing is given, and all other variable inplicitly is (0, 1) from the pldag model,
+// the root will be (0,1) since there's not enough information to evalute the root `or` node.
+println!("Root valid? {}", *validited.get(&root).unwrap() == (1, 1)); // This will be False
+
+// If we however for instance fix x to be zero, then the root is false
+inputs.insert("x".to_string(), (0,0));
+let revalidited = pldag.check_combination(&inputs);
+println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be false
+
+// However, fixing y and z to 1 will yield the root node to be true (since the root will be true if any of x, y or z is true).
+inputs.insert("y".to_string(), (1,1));
+inputs.insert("z".to_string(), (1,1));
+let revalidited = pldag.check_combination(&inputs);
+println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be true
 
 // 2. Score a configuration:
-let weights: HashMap<String, f64> = /* per-node weights */;
-let scores = pldag.score_combination(&inputs, &weights);
-println!("Total score: {}", scores.get("root").unwrap());
+// We can score a configuration by using the score_combination function.
+let mut weights: IndexMap<String, f64> = IndexMap::new();
+weights.insert("x".to_string(), 1.0);
+weights.insert("y".to_string(), 2.0);
+weights.insert("z".to_string(), 3.0);
+// Add a discount value if the root is true
+weights.insert(root.clone(), -1.0);
+let scores = pldag.check_and_score(&inputs, &weights);
+println!("Total score: {:?}", scores.get(&root).unwrap());
 
-// 3. Validate and score in one go:
-let (valid_map, score_map) = pldag.check_and_score(&inputs, &weights);
+// And notice what will happen if we remove the x value (i.e. x being (0,1))
+inputs.insert("x".to_string(), (0,1));
+let scores = pldag.check_and_score(&inputs, &weights);
+// The root will return (5,6) meaning its value is between 5 and 6 with not enough information to
+// determine the exact value. 
+println!("Total score: {:?}", scores.get(&root).unwrap());
 
-// 4. Export for ILP:
-let poly = pldag.to_sparse_polyhedron();
-// feed `poly` to your ILP solver
+// .. and if we set x to be 0, then the root will be definitely 5.
+inputs.insert("x".to_string(), (0,0));
+let scores = pldag.check_and_score(&inputs, &weights);
+println!("Total score: {:?}", scores.get(&root).unwrap());
 
-// 5. Batch scoring:
-let multi_scores = pldag.batch_score_combinations(&inputs, &multi_weights);
+// .. and if we set y and z to be 0, then the root will be 0.
+inputs.insert("y".to_string(), (0,0));
+inputs.insert("z".to_string(), (0,0));
+let scores = pldag.check_and_score(&inputs, &weights);
+println!("Total score: {:?}", scores.get(&root).unwrap());
 ```
 
 Enjoy building and evaluating logical models with the PL-DAG!
