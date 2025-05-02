@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use bimap::BiMap;
+use indexmap::set::Intersection;
 use std::ops::RangeInclusive;
 use itertools::Itertools;
 use indexmap::{IndexMap, IndexSet};
@@ -579,7 +580,7 @@ impl Pldag {
         self.score_combination(&self.check_combination_default(), weights)
     }
 
-    pub fn to_sparse_polyhedron(&self, double_binding: bool) -> SparsePolyhedron {
+    pub fn to_sparse_polyhedron(&self, double_binding: bool, integer_constraints: bool, fixed_constraints: bool) -> SparsePolyhedron {
 
         fn get_coef_bounds(composite: &Constraint, amat: &IndexMap<String, BoolExpression>) -> IndexMap<String, Bound> {
             let mut coef_bounds: IndexMap<String, Bound> = IndexMap::new();
@@ -704,23 +705,25 @@ impl Pldag {
             row_i += 1;
         }
 
-        // Add the bounds for the primitive variables that are fixed.
-        // We start by creating a grouping on the lower and upper bounds of the primitive variables
-        let mut fixed_bound_map: HashMap<i64, Vec<usize>> = HashMap::new();
-        for (key, bound) in primitives.iter().filter(|(_, bound)| bound_fixed(**bound)) {
-            fixed_bound_map.entry(bound.0).or_insert_with(Vec::new).push(*column_names_map.get(&key.to_string()).unwrap());
-        }
-
-        for (v, primitive_ids) in fixed_bound_map.iter() {
-            let b = *v * primitive_ids.len() as i64;
-            for i in vec![-1, 1] {
-                for primitive_id in primitive_ids {
-                    A_matrix.rows.push(row_i);
-                    A_matrix.cols.push(*primitive_id);
-                    A_matrix.vals.push(i);
+        if fixed_constraints {
+            // Add the bounds for the primitive variables that are fixed.
+            // We start by creating a grouping on the lower and upper bounds of the primitive variables
+            let mut fixed_bound_map: HashMap<i64, Vec<usize>> = HashMap::new();
+            for (key, bound) in primitives.iter().filter(|(_, bound)| bound_fixed(**bound)) {
+                fixed_bound_map.entry(bound.0).or_insert_with(Vec::new).push(*column_names_map.get(&key.to_string()).unwrap());
+            }
+    
+            for (v, primitive_ids) in fixed_bound_map.iter() {
+                let b = *v * primitive_ids.len() as i64;
+                for i in vec![-1, 1] {
+                    for primitive_id in primitive_ids {
+                        A_matrix.rows.push(row_i);
+                        A_matrix.cols.push(*primitive_id);
+                        A_matrix.vals.push(i);
+                    }
+                    b_vector.push(i * b);
+                    row_i += 1;
                 }
-                b_vector.push(i * b);
-                row_i += 1;
             }
         }
 
@@ -733,24 +736,26 @@ impl Pldag {
             // Add the variable to the integer variables list
             integer_variables.push(p_key.to_string());
             
-            // Get the index of the current key
-            let pi = *column_names_map.get(&p_key.to_string()).unwrap();
-            
-            if p_bound.0 < 0 {
-                A_matrix.rows.push(row_i);
-                A_matrix.cols.push(pi);
-                A_matrix.vals.push(-1);
-                b_vector.push(-1 * p_bound.0);
-                row_i += 1;
+            if integer_constraints {
+                // Get the index of the current key
+                let pi = *column_names_map.get(&p_key.to_string()).unwrap();
+                
+                if p_bound.0 < 0 {
+                    A_matrix.rows.push(row_i);
+                    A_matrix.cols.push(pi);
+                    A_matrix.vals.push(-1);
+                    b_vector.push(-1 * p_bound.0);
+                    row_i += 1;
+                }
+    
+                if p_bound.1 > 1 {
+                    A_matrix.rows.push(row_i);
+                    A_matrix.cols.push(pi);
+                    A_matrix.vals.push(1);
+                    b_vector.push(p_bound.1);
+                    row_i += 1;
+                } 
             }
-
-            if p_bound.1 > 1 {
-                A_matrix.rows.push(row_i);
-                A_matrix.cols.push(pi);
-                A_matrix.vals.push(1);
-                b_vector.push(p_bound.1);
-                row_i += 1;
-            } 
         }
 
         // Set the shape of the A matrix
@@ -768,15 +773,15 @@ impl Pldag {
     }
 
     pub fn to_sparse_polyhedron_default(&self) -> SparsePolyhedron {
-        self.to_sparse_polyhedron(true)
+        self.to_sparse_polyhedron(true, true, true)
     }
 
-    pub fn to_dense_polyhedron(&self, double_binding: bool) -> DensePolyhedron {
-        DensePolyhedron::from(self.to_sparse_polyhedron(double_binding))
+    pub fn to_dense_polyhedron(&self, double_binding: bool, integer_constraints: bool, fixed_constraints: bool) -> DensePolyhedron {
+        DensePolyhedron::from(self.to_sparse_polyhedron(double_binding, integer_constraints, fixed_constraints))
     }
 
     pub fn to_dense_polyhedron_default(&self) -> DensePolyhedron {
-        self.to_dense_polyhedron(true)
+        self.to_dense_polyhedron(true, true, true)
     }
     
     pub fn set_primitive(&mut self, id: ID, bound: Bound) {
