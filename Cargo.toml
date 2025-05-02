@@ -3,6 +3,9 @@ name = "pldag-rust"
 version = "0.1.0"
 edition = "2021"
 
+description = "A DAG-based framework where nodes encode arbitrary Boolean operations over literal leaves, with built-in support for combination checks, scoring, and ILP export."
+license = "MIT"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
