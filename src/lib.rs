@@ -2,13 +2,12 @@ use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use bimap::BiMap;
-use indexmap::set::Intersection;
 use std::ops::RangeInclusive;
 use itertools::Itertools;
 use indexmap::{IndexMap, IndexSet};
 
-type Bound = (i64, i64);
-type ID = String;
+pub type Bound = (i64, i64);
+pub type ID = String;
 
 // Function to create a hash from a reference to Vec<(String, i64)> and an i64
 fn create_hash(data: &Vec<(String, i64)>, num: i64) -> u64 {
@@ -55,27 +54,27 @@ fn bound_span(b: Bound) -> i64 {
     return (b.1 - b.0).abs();
 }
 
-struct SparseIntegerMatrix {
-    rows: Vec<usize>,
-    cols: Vec<usize>,
-    vals: Vec<i64>,
-    shape: (usize, usize),
+pub struct SparseIntegerMatrix {
+    pub rows: Vec<usize>,
+    pub cols: Vec<usize>,
+    pub vals: Vec<i64>,
+    pub shape: (usize, usize),
 }
 
-struct DenseIntegerMatrix {
-    data: Vec<Vec<i64>>,
-    shape: (usize, usize),
+pub struct DenseIntegerMatrix {
+    pub data: Vec<Vec<i64>>,
+    pub shape: (usize, usize),
 }
 
 impl DenseIntegerMatrix {
-    fn new(rows: usize, cols: usize) -> DenseIntegerMatrix {
+    pub fn new(rows: usize, cols: usize) -> DenseIntegerMatrix {
         DenseIntegerMatrix {
             data: vec![vec![0; cols]; rows],
             shape: (rows, cols),
         }
     }
 
-    fn dot_product(&self, vector: &Vec<i64>) -> Vec<i64> {
+    pub fn dot_product(&self, vector: &Vec<i64>) -> Vec<i64> {
         let mut result = vec![0; self.shape.0];
         for i in 0..self.shape.0 {
             for j in 0..self.shape.1 {
@@ -86,15 +85,15 @@ impl DenseIntegerMatrix {
     }
 }
 
-struct DensePolyhedron {
-    A: DenseIntegerMatrix,
-    b: Vec<i64>,
-    columns: Vec<String>,
-    integer_columns: Vec<String>,
+pub struct DensePolyhedron {
+    pub A: DenseIntegerMatrix,
+    pub b: Vec<i64>,
+    pub columns: Vec<String>,
+    pub integer_columns: Vec<String>,
 }
 
 impl DensePolyhedron {
-    fn to_vector(&self, from_interpretation: &HashMap<String, i64>) -> Vec<i64> {
+    pub fn to_vector(&self, from_interpretation: &HashMap<String, i64>) -> Vec<i64> {
         let mut vector: Vec<i64> = vec![0; self.columns.len()];
         for (index, v) in from_interpretation
             .iter()
@@ -105,7 +104,7 @@ impl DensePolyhedron {
         vector
     }
 
-    fn assume(&self, values: &HashMap<String, i64>) -> DensePolyhedron {
+    pub fn assume(&self, values: &HashMap<String, i64>) -> DensePolyhedron {
         // 1) Make mutable copies of everything
         let mut new_A_data   = self.A.data.clone();     // Vec<Vec<i64>>
         let mut new_b        = self.b.clone();          // Vec<i64>
@@ -162,7 +161,7 @@ impl DensePolyhedron {
         }
     }
 
-    fn evaluate(&self, interpretation: &IndexMap<String, Bound>) -> Bound {
+    pub fn evaluate(&self, interpretation: &IndexMap<String, Bound>) -> Bound {
         let mut lower_bounds = HashMap::new();
         let mut upper_bounds = HashMap::new();
         for (key, bound) in interpretation {
@@ -228,7 +227,7 @@ impl SparseIntegerMatrix {
     }
 }
 
-struct SparsePolyhedron {
+pub struct SparsePolyhedron {
     // ...
     A: SparseIntegerMatrix,
     b: Vec<i64>,
@@ -281,13 +280,13 @@ impl From<DensePolyhedron> for SparsePolyhedron {
 
 pub type Coefficient = (String, i64);
 pub struct Constraint {
-    coefficients: Vec<Coefficient>,
-    bias: Bound,
+    pub coefficients: Vec<Coefficient>,
+    pub bias: Bound,
 }
 
 impl Constraint {
 
-    fn dot(&self, values: &IndexMap<String, Bound>) -> Bound {
+    pub fn dot(&self, values: &IndexMap<String, Bound>) -> Bound {
         self.coefficients.iter().fold((0, 0), |acc, (key, coeff)| {
             let bound = values.get(key).unwrap_or(&(0, 0));
             let (min, max) = bound_multiply(*coeff, *bound);
@@ -295,7 +294,7 @@ impl Constraint {
         })
     }
 
-    fn evaluate(&self, values: &IndexMap<String, Bound>) -> Bound {
+    pub fn evaluate(&self, values: &IndexMap<String, Bound>) -> Bound {
         let bound = self.dot(values);
         return (
             (bound.0 + self.bias.0 >= 0) as i64,
@@ -303,7 +302,7 @@ impl Constraint {
         )
     }
 
-    fn negate(&self) -> Constraint {
+    pub fn negate(&self) -> Constraint {
         Constraint {
             coefficients: self.coefficients.iter().map(|(key, val)| {
                 (key.clone(), -val)
