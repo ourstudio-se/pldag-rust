@@ -217,7 +217,7 @@ impl From<DenseIntegerMatrix> for SparseIntegerMatrix {
 }
 
 impl SparseIntegerMatrix {
-    fn new() -> SparseIntegerMatrix {
+    pub fn new() -> SparseIntegerMatrix {
         SparseIntegerMatrix {
             rows: Vec::new(),
             cols: Vec::new(),
@@ -229,10 +229,10 @@ impl SparseIntegerMatrix {
 
 pub struct SparsePolyhedron {
     // ...
-    A: SparseIntegerMatrix,
-    b: Vec<i64>,
-    columns: Vec<String>,
-    integer_columns: Vec<String>,
+    pub A: SparseIntegerMatrix,
+    pub b: Vec<i64>,
+    pub columns: Vec<String>,
+    pub integer_columns: Vec<String>,
 }
 
 impl From<SparsePolyhedron> for DensePolyhedron {
