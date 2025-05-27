@@ -328,7 +328,7 @@ pub struct Pldag {
 
 impl Pldag {
 
-    fn new() -> Pldag {
+    pub fn new() -> Pldag {
         Pldag {
             _amat: IndexMap::new(),
             _amap: BiMap::new(),
@@ -377,7 +377,7 @@ impl Pldag {
         deps
     }
 
-    fn primitive_combinations(&self) -> impl Iterator<Item = HashMap<ID, i64>> {
+    pub fn primitive_combinations(&self) -> impl Iterator<Item = HashMap<ID, i64>> {
         // 1. Pull out [(var_name, (low, high)), …]
         let primitives: Vec<(String, (i64, i64))> = self._amat
             .iter()
