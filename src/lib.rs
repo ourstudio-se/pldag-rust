@@ -279,8 +279,8 @@ impl From<DensePolyhedron> for SparsePolyhedron {
     }
 }
 
-type Coefficient = (String, i64);
-struct Constraint {
+pub type Coefficient = (String, i64);
+pub struct Constraint {
     coefficients: Vec<Coefficient>,
     bias: Bound,
 }
@@ -315,16 +315,16 @@ impl Constraint {
         }
     }
 }
-enum BoolExpression {
+pub enum BoolExpression {
     Composite(Constraint),
     Primitive(Bound),
 }
 
-struct Pldag {
+pub struct Pldag {
     // Contraints matrix map
-    _amat: IndexMap<String, BoolExpression>,
+    pub _amat: IndexMap<String, BoolExpression>,
     // Aliases map
-    _amap: BiMap<String, String>,
+    pub _amap: BiMap<String, String>,
 }
 
 impl Pldag {
