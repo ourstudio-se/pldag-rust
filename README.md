@@ -4,6 +4,11 @@ A **Primitive Logic Directed Acyclic Graph** (PL-DAG) is a DAG in which every no
 
 ---
 
+## Install
+```bash
+cargo add pldag-rust
+```
+
 ## Core Routines
 
 The PL-DAG provides these core APIs for working with combinations and evaluations:
