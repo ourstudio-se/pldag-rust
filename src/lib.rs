@@ -93,9 +93,9 @@ pub struct DensePolyhedron {
 }
 
 impl DensePolyhedron {
-    pub fn to_vector(&self, from_interpretation: &HashMap<String, i64>) -> Vec<i64> {
+    pub fn to_vector(&self, from_assignments: &HashMap<String, i64>) -> Vec<i64> {
         let mut vector: Vec<i64> = vec![0; self.columns.len()];
-        for (index, v) in from_interpretation
+        for (index, v) in from_assignments
             .iter()
             .filter_map(|(k, v)| self.columns.iter().position(|col| col == k).map(|index| (index, v)))
         {
@@ -161,10 +161,10 @@ impl DensePolyhedron {
         }
     }
 
-    pub fn evaluate(&self, interpretation: &IndexMap<String, Bound>) -> Bound {
+    pub fn evaluate(&self, assignments: &IndexMap<String, Bound>) -> Bound {
         let mut lower_bounds = HashMap::new();
         let mut upper_bounds = HashMap::new();
-        for (key, bound) in interpretation {
+        for (key, bound) in assignments {
             lower_bounds.insert(key.clone(), bound.0);
             upper_bounds.insert(key.clone(), bound.1);
         }
@@ -431,9 +431,9 @@ impl Pldag {
         return from_id.clone();
     }
 
-    pub fn check_combination(&self, interpretation: &IndexMap<ID, Bound>) -> IndexMap<ID, Bound> {
+    pub fn propagate(&self, assignments: &IndexMap<ID, Bound>) -> IndexMap<ID, Bound> {
 
-        let mut result= interpretation.clone();
+        let mut result= assignments.clone();
 
         // Fill result with the primitive variable bounds
         for (key, value) in self._amat.iter() {
@@ -446,7 +446,7 @@ impl Pldag {
 
         // S = All composites that 
         // (1) have only primitive variables as input and
-        // (2) are not present in `result/interpretation`
+        // (2) are not present in `result/assignments`
         let mut S: VecDeque<String> = self._amat
             .iter()
             .filter(|(key, constraint)| {
@@ -519,8 +519,8 @@ impl Pldag {
         return result;
     }
     
-    pub fn check_combination_default(&self) -> IndexMap<ID, Bound> {
-        let interpretation: IndexMap<String, Bound> = self._amap.iter().filter_map(|(key, value)| {
+    pub fn propagate_default(&self) -> IndexMap<ID, Bound> {
+        let assignments: IndexMap<String, Bound> = self._amap.iter().filter_map(|(key, value)| {
             if let Some(bound) = self._amat.get(key) {
                 if let BoolExpression::Primitive(bound) = bound {
                     Some((value.clone(), *bound))
@@ -531,20 +531,20 @@ impl Pldag {
                 None
             }
         }).collect();
-        self.check_combination(&interpretation)
+        self.propagate(&assignments)
     }
     
-    pub fn score_combination_batch(&self, interpretation: &IndexMap<ID, Bound>, weight_sets: &Vec<&IndexMap<ID, f64>>) -> Vec<HashMap<ID, (f64, f64)>> {
+    pub fn accumulate_batch(&self, assignments: &IndexMap<ID, Bound>, weight_sets: &Vec<&IndexMap<ID, f64>>) -> Vec<HashMap<ID, (f64, f64)>> {
         let trans_deps = self.transitive_dependencies();
         let mut result = Vec::new();
         for weights in weight_sets {
             let mut local_result = HashMap::new();
     
             for (variable, dependencies) in trans_deps.iter() {
-                let variable_bounds = interpretation.get(variable.as_str()).unwrap_or(&(0, 1));
+                let variable_bounds = assignments.get(variable.as_str()).unwrap_or(&(0, 1));
                 if dependencies.len() > 0 {
                     let dependency_weighted_bound = dependencies.iter()
-                        .filter_map(|dep| interpretation.get(dep).map(|bound| {
+                        .filter_map(|dep| assignments.get(dep).map(|bound| {
                             let weight = weights.get(dep).unwrap_or(&0.0);
                             (
                                 (bound.0 as f64) * weight,
@@ -567,16 +567,16 @@ impl Pldag {
         return result;
     }
 
-    pub fn score_combination(&self, interpretation: &IndexMap<ID, Bound>, weights: &IndexMap<ID, f64>) -> HashMap<ID, (f64, f64)> {
-        return self.score_combination_batch(interpretation, &vec![weights]).get(0).unwrap().clone();
+    pub fn accumulate(&self, assignments: &IndexMap<ID, Bound>, weights: &IndexMap<ID, f64>) -> HashMap<ID, (f64, f64)> {
+        return self.accumulate_batch(assignments, &vec![weights]).get(0).unwrap().clone();
     }
     
-    pub fn check_and_score(&self, interpretation: &IndexMap<ID, Bound>, weights: &IndexMap<ID, f64>) -> HashMap<ID, (f64, f64)> {
-        self.score_combination(&self.check_combination(interpretation), weights)
+    pub fn propagate_then_accumulate(&self, assignments: &IndexMap<ID, Bound>, weights: &IndexMap<ID, f64>) -> HashMap<ID, (f64, f64)> {
+        self.accumulate(&self.propagate(assignments), weights)
     }
 
-    pub fn check_and_score_default(&self, weights: &IndexMap<ID, f64>) -> HashMap<ID, (f64, f64)> {
-        self.score_combination(&self.check_combination_default(), weights)
+    pub fn propagate_then_accumulate_default(&self, weights: &IndexMap<ID, f64>) -> HashMap<ID, (f64, f64)> {
+        self.accumulate(&self.propagate_default(), weights)
     }
 
     pub fn to_sparse_polyhedron(&self, double_binding: bool, integer_constraints: bool, fixed_constraints: bool) -> SparsePolyhedron {
@@ -904,9 +904,9 @@ mod tests {
 
     /// Helper: for every primitive combination,
     ///   1) run `propagate` on the PLDAG model  
-    ///   2) build the corresponding interpretation  
+    ///   2) build the corresponding assignments  
     ///   3) run `assume(root=1)` on the polyhedron  
-    ///   4) evaluate the shrunken polyhedron on the same interpretation  
+    ///   4) evaluate the shrunken polyhedron on the same assignments  
     ///   5) assert they agree at `root`.
     fn evaluate_model_polyhedron(
         model: &Pldag,
@@ -920,7 +920,7 @@ mod tests {
                 .collect::<IndexMap<String,Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.check_combination(&interp);
+            let prop = model.propagate(&interp);
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -948,15 +948,15 @@ mod tests {
         model.set_primitive("y".to_string(), (0, 1));
         let root = model.set_and(vec!["x".to_string(), "y".to_string()], None);
 
-        let result = model.check_combination(&IndexMap::new());
+        let result = model.propagate(&IndexMap::new());
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get(&root).unwrap(), &(0, 1));
 
-        let mut interpretation = IndexMap::new();
-        interpretation.insert("x".to_string(), (1, 1));
-        interpretation.insert("y".to_string(), (1, 1));
-        let result = model.check_combination(&interpretation);
+        let mut assignments = IndexMap::new();
+        assignments.insert("x".to_string(), (1, 1));
+        assignments.insert("y".to_string(), (1, 1));
+        let result = model.propagate(&assignments);
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         let mut model = Pldag::new();
@@ -964,31 +964,31 @@ mod tests {
         model.set_primitive("y".to_string(), (0, 1));
         model.set_primitive("z".to_string(), (0, 1));
         let root = model.set_xor(vec!["x".to_string(), "y".to_string(), "z".to_string()], None);
-        let result = model.check_combination(&IndexMap::new());
+        let result = model.propagate(&IndexMap::new());
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get("z").unwrap(), &(0, 1));
         assert_eq!(result.get(&root).unwrap(), &(0, 1));
 
-        let mut interpretation = IndexMap::new();
-        interpretation.insert("x".to_string(), (1, 1));
-        interpretation.insert("y".to_string(), (1, 1));
-        interpretation.insert("z".to_string(), (1, 1));
-        let result = model.check_combination(&interpretation);
+        let mut assignments = IndexMap::new();
+        assignments.insert("x".to_string(), (1, 1));
+        assignments.insert("y".to_string(), (1, 1));
+        assignments.insert("z".to_string(), (1, 1));
+        let result = model.propagate(&assignments);
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
         
-        let mut interpretation = IndexMap::new();
-        interpretation.insert("x".to_string(), (0, 1));
-        interpretation.insert("y".to_string(), (1, 1));
-        interpretation.insert("z".to_string(), (1, 1));
-        let result = model.check_combination(&interpretation);
+        let mut assignments = IndexMap::new();
+        assignments.insert("x".to_string(), (0, 1));
+        assignments.insert("y".to_string(), (1, 1));
+        assignments.insert("z".to_string(), (1, 1));
+        let result = model.propagate(&assignments);
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
         
-        let mut interpretation = IndexMap::new();
-        interpretation.insert("x".to_string(), (0, 0));
-        interpretation.insert("y".to_string(), (1, 1));
-        interpretation.insert("z".to_string(), (0, 0));
-        let result = model.check_combination(&interpretation);
+        let mut assignments = IndexMap::new();
+        assignments.insert("x".to_string(), (0, 0));
+        assignments.insert("y".to_string(), (1, 1));
+        assignments.insert("z".to_string(), (0, 0));
+        let result = model.propagate(&assignments);
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
     }
 
@@ -1001,7 +1001,7 @@ mod tests {
         let or_root = model.set_or(vec!["a".into(), "b".into()], None);
 
         // No assignment: both inputs full [0,1], output [0,1]
-        let res = model.check_combination(&IndexMap::new());
+        let res = model.propagate(&IndexMap::new());
         assert_eq!(res["a"], (0, 1));
         assert_eq!(res["b"], (0, 1));
         assert_eq!(res[&or_root], (0, 1));
@@ -1009,20 +1009,20 @@ mod tests {
         // a=1 ⇒ output must be 1
         let mut interp = IndexMap::new();
         interp.insert("a".into(), (1, 1));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
         let mut interp = IndexMap::new();
         interp.insert("a".into(), (0, 0));
         interp.insert("b".into(), (0, 0));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
         let mut interp = IndexMap::new();
         interp.insert("b".into(), (0, 0));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&or_root], (0, 1));
     }
 
@@ -1034,20 +1034,20 @@ mod tests {
         let not_root = model.set_not(vec!["p".into()], None);
 
         // no assignment ⇒ [0,1]
-        let res = model.check_combination(&IndexMap::new());
+        let res = model.propagate(&IndexMap::new());
         assert_eq!(res["p"], (0, 1));
         assert_eq!(res[&not_root], (0, 1));
 
         // p = 0 ⇒ root = 1
         let mut interp = IndexMap::new();
         interp.insert("p".into(), (0, 0));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
         let mut interp = IndexMap::new();
         interp.insert("p".into(), (1, 1));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&not_root], (0, 0));
     }
 
@@ -1122,7 +1122,7 @@ mod tests {
         let v = model.set_xor(vec![w.clone(), "z".into()], None);
 
         // no assignment: everything [0,1]
-        let res = model.check_combination(&IndexMap::new());
+        let res = model.propagate(&IndexMap::new());
         for var in &["x","y","z"] {
             assert_eq!(res[*var], (0,1), "{}", var);
         }
@@ -1134,7 +1134,7 @@ mod tests {
         interp.insert("x".into(), (1,1));
         interp.insert("y".into(), (1,1));
         interp.insert("z".into(), (0,0));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&w], (1,1));
         assert_eq!(res[&v], (1,1));
 
@@ -1143,7 +1143,7 @@ mod tests {
         interp.insert("x".into(), (0,0));
         interp.insert("y".into(), (1,1));
         interp.insert("z".into(), (1,1));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&w], (0,0));
         assert_eq!(res[&v], (1,1));
 
@@ -1152,7 +1152,7 @@ mod tests {
         interp.insert("x".into(), (0,0));
         interp.insert("y".into(), (0,0));
         interp.insert("z".into(), (0,0));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
         assert_eq!(res[&w], (0,0));
         assert_eq!(res[&v], (0,0));
     }
@@ -1169,7 +1169,7 @@ mod tests {
         let mut interp = IndexMap::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u".into(), (5,5));
-        let res = model.check_combination(&interp);
+        let res = model.propagate(&interp);
 
         // we expect propagate to return exactly (5,5) for "u" and compute root = negate(5)
         assert_eq!(res["u"], (5,5));
@@ -1184,11 +1184,11 @@ mod tests {
 
         fn evaluate_model_polyhedron(model: &Pldag, polyhedron: &DensePolyhedron, root: &String) {
             for combination in model.primitive_combinations() {
-                let interpretation = combination
+                let assignments = combination
                     .iter()
                     .map(|(k, &v)| (k.clone(), (v, v)))
                     .collect::<IndexMap<String, Bound>>();
-                let model_prop = model.check_combination(&interpretation);
+                let model_prop = model.propagate(&assignments);
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -1358,13 +1358,13 @@ mod tests {
         model.set_primitive("x".to_string(), (0, 1));
         model.set_primitive("y".to_string(), (0, 1));
         let root = model.set_and(vec!["x".to_string(), "y".to_string()], None);
-        let mut interpretation = IndexMap::new();
-        interpretation.insert("x".to_string(), (1, 1));
-        interpretation.insert("y".to_string(), (1, 1));
+        let mut assignments = IndexMap::new();
+        assignments.insert("x".to_string(), (1, 1));
+        assignments.insert("y".to_string(), (1, 1));
         let mut weights: IndexMap<String, f64> = IndexMap::new();
         weights.insert("x".to_string(), 2.0);
         weights.insert("y".to_string(), 3.0);
-        let propagated = model.check_and_score(&interpretation, &weights);
+        let propagated = model.propagate_then_accumulate(&assignments, &weights);
         assert_eq!(propagated.get("x").unwrap(), &(2.0, 2.0));
         assert_eq!(propagated.get("y").unwrap(), &(3.0, 3.0));
         assert_eq!(propagated.get(&root).unwrap(), &(5.0, 5.0));
@@ -1391,20 +1391,20 @@ mod tests {
 
         // 1. Validate a combination:
         let mut inputs: IndexMap<String, Bound> = IndexMap::new();
-        let validited = pldag.check_combination(&inputs);
+        let validited = pldag.propagate(&inputs);
         // Since nothing is given, and all other variable inplicitly is (0, 1) from the pldag model,
         // the root will be (0,1) since there's not enough information to evalute the root `or` node.
         println!("Root valid? {}", *validited.get(&root).unwrap() == (1, 1)); // This will be False
 
         // If we however for instance fix x to be zero, then the root is false
         inputs.insert("x".to_string(), (0,0));
-        let revalidited = pldag.check_combination(&inputs);
+        let revalidited = pldag.propagate(&inputs);
         println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be false
 
         // However, fixing y and z to 1 will yield the root node to be true (since the root will be true if any of x, y or z is true).
         inputs.insert("y".to_string(), (1,1));
         inputs.insert("z".to_string(), (1,1));
-        let revalidited = pldag.check_combination(&inputs);
+        let revalidited = pldag.propagate(&inputs);
         println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be true
 
         // 2. Score a configuration:
@@ -1415,25 +1415,25 @@ mod tests {
         weights.insert("z".to_string(), 3.0);
         // Add a discount value if the root is true
         weights.insert(root.clone(), -1.0);
-        let scores = pldag.check_and_score(&inputs, &weights);
+        let scores = pldag.propagate_then_accumulate(&inputs, &weights);
         println!("Total score: {:?}", scores.get(&root).unwrap());
 
         // And notice what will happen if we remove the x value (i.e. x being (0,1))
         inputs.insert("x".to_string(), (0,1));
-        let scores = pldag.check_and_score(&inputs, &weights);
+        let scores = pldag.propagate_then_accumulate(&inputs, &weights);
         // The root will return (5,6) meaning its value is between 5 and 6 with not enough information to
         // determine the exact value. 
         println!("Total score: {:?}", scores.get(&root).unwrap());
 
         // .. and if we set x to be 0, then the root will be definitely 5.
         inputs.insert("x".to_string(), (0,0));
-        let scores = pldag.check_and_score(&inputs, &weights);
+        let scores = pldag.propagate_then_accumulate(&inputs, &weights);
         println!("Total score: {:?}", scores.get(&root).unwrap());
 
         // .. and if we set y and z to be 0, then the root will be 0.
         inputs.insert("y".to_string(), (0,0));
         inputs.insert("z".to_string(), (0,0));
-        let scores = pldag.check_and_score(&inputs, &weights);
+        let scores = pldag.propagate_then_accumulate(&inputs, &weights);
         println!("Total score: {:?}", scores.get(&root).unwrap());
     }
 }
