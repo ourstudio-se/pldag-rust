@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "pldag-rust"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bimap",
  "indexmap",

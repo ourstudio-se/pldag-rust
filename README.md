@@ -13,12 +13,12 @@ cargo add pldag-rust
 
 The PL-DAG provides these core APIs for working with combinations and evaluations:
 
-### 1. `check_combination`
+### 1. `propagate`
 
 ```rust
-fn check_combination(
+fn propagate(
     &self,
-    inputs: &HashMap<String, Bound>,
+    assignments: &IndexMap<String, Bound>,
 ) -> HashMap<String, bool>;
 ```
 
@@ -26,13 +26,13 @@ fn check_combination(
 
 ---
 
-### 2. `score_combination`
+### 2. `accumulate`
 
 ```rust
-fn score_combination(
+fn accumulate(
     &self,
-    inputs: &HashMap<String, Bound>,
-    weights: &HashMap<String, f64>,
+    assignments: &IndexMap<String, Bound>,
+    weights: &IndexMap<String, f64>,
 ) -> HashMap<String, f64>;
 ```
 
@@ -40,17 +40,17 @@ fn score_combination(
 
 ---
 
-### 3. `check_and_score`
+### 3. `propagate_then_accumulate`
 
 ```rust
-fn check_and_score(
+fn propagate_then_accumulate(
     &self,
-    inputs: &HashMap<String, Bound>,
-    weights: &HashMap<String, f64>,
+    assignments: &IndexMap<ID, Bound>, 
+    weights: &IndexMap<ID, f64>
 ) -> (HashMap<String, bool>, HashMap<String, f64>);
 ```
 
-- **Purpose:** A one-stop helper that first runs `check_combination` and then feeds the resulting Booleans into `score_combination`. Returns both the Boolean map and the per-node scores in one call.
+- **Purpose:** A one-stop helper that first runs `propagate` and then feeds the resulting Booleans into `accumulate`. Returns both the Boolean map and the per-node scores in one call.
 
 ---
 
@@ -64,17 +64,17 @@ fn to_sparse_polyhedron(&self) -> SparsePolyhedron;
 
 ---
 
-### 5. `batch_score_combinations`
+### 5. `accumulate_batch`
 
 ```rust
-fn batch_score_combinations(
-    &self,
-    inputs: &HashMap<String, Bound>,
-    weight_sets: &HashMap<String, HashMap<String, f64>>,
-) -> HashMap<String, HashMap<String, f64>>;
+fn accumulate_batch(
+    &self, 
+    assignments: &IndexMap<ID, Bound>, 
+    weight_sets: &Vec<&IndexMap<ID, f64>>
+) -> Vec<HashMap<ID, (f64, f64)>>;
 ```
 
-- **Purpose:** Score a single combination against multiple weight maps at once. Returns, for each named weight set, a per-node score map.
+- **Purpose:** Accumulates a single combination against multiple weight maps at once. Returns, for each named weight set, a per-node score map.
 
 ---
 
@@ -104,20 +104,20 @@ let root = pldag.set_or(vec![
 
 // 1. Validate a combination:
 let mut inputs: IndexMap<String, Bound> = IndexMap::new();
-let validited = pldag.check_combination(&inputs);
+let validited = pldag.propagate(&inputs);
 // Since nothing is given, and all other variable inplicitly is (0, 1) from the pldag model,
 // the root will be (0,1) since there's not enough information to evalute the root `or` node.
 println!("Root valid? {}", *validited.get(&root).unwrap() == (1, 1)); // This will be False
 
 // If we however for instance fix x to be zero, then the root is false
 inputs.insert("x".to_string(), (0,0));
-let revalidited = pldag.check_combination(&inputs);
+let revalidited = pldag.propagate(&inputs);
 println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be false
 
 // However, fixing y and z to 1 will yield the root node to be true (since the root will be true if any of x, y or z is true).
 inputs.insert("y".to_string(), (1,1));
 inputs.insert("z".to_string(), (1,1));
-let revalidited = pldag.check_combination(&inputs);
+let revalidited = pldag.propagate(&inputs);
 println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be true
 
 // 2. Score a configuration:
@@ -128,25 +128,25 @@ weights.insert("y".to_string(), 2.0);
 weights.insert("z".to_string(), 3.0);
 // Add a discount value if the root is true
 weights.insert(root.clone(), -1.0);
-let scores = pldag.check_and_score(&inputs, &weights);
+let scores = pldag.propagate_then_accumulate(&inputs, &weights);
 println!("Total score: {:?}", scores.get(&root).unwrap());
 
 // And notice what will happen if we remove the x value (i.e. x being (0,1))
 inputs.insert("x".to_string(), (0,1));
-let scores = pldag.check_and_score(&inputs, &weights);
+let scores = pldag.propagate_then_accumulate(&inputs, &weights);
 // The root will return (5,6) meaning its value is between 5 and 6 with not enough information to
 // determine the exact value. 
 println!("Total score: {:?}", scores.get(&root).unwrap());
 
 // .. and if we set x to be 0, then the root will be definitely 5.
 inputs.insert("x".to_string(), (0,0));
-let scores = pldag.check_and_score(&inputs, &weights);
+let scores = pldag.propagate_then_accumulate(&inputs, &weights);
 println!("Total score: {:?}", scores.get(&root).unwrap());
 
 // .. and if we set y and z to be 0, then the root will be 0.
 inputs.insert("y".to_string(), (0,0));
 inputs.insert("z".to_string(), (0,0));
-let scores = pldag.check_and_score(&inputs, &weights);
+let scores = pldag.propagate_then_accumulate(&inputs, &weights);
 println!("Total score: {:?}", scores.get(&root).unwrap());
 ```
 
