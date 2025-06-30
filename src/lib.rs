@@ -761,7 +761,7 @@ impl Pldag {
     /// 
     /// # Returns
     /// Vector of valued assignments, each containing bounds and accumulated coefficients
-    pub fn propagate_many_coefs(&self, assignments: Vec<&Assignment>) -> Vec<ValuedAssignment> {
+    pub fn propagate_many_coefs(&self, assignments: Vec<&Assignment>, propagate: bool) -> Vec<ValuedAssignment> {
         // Calculate transitive dependencies
         let transitive_deps = self.transitive_dependencies();
 
@@ -770,7 +770,12 @@ impl Pldag {
         for assignment in assignments {
 
             // Start with the propagated bounds
-            let result = self.propagate(assignment);
+            let result = if propagate {
+                self.propagate(assignment)
+            } else {
+                // If not propagating, use the input assignment directly
+                assignment.clone()
+            };
     
             let mut valued_assigment: ValuedAssignment = IndexMap::new();
             // Calculate the accumulated coefficients with the new bound result
@@ -816,9 +821,9 @@ impl Pldag {
     /// 
     /// # Panics
     /// Panics if no assignments are returned (should not happen under normal circumstances)
-    pub fn propagate_coefs(&self, assignment: &Assignment) -> ValuedAssignment {
+    pub fn propagate_coefs(&self, assignment: &Assignment, propagate: bool) -> ValuedAssignment {
         // Propagate the assignment through the Pldag
-        return self.propagate_many_coefs(vec![assignment]).into_iter().next()
+        return self.propagate_many_coefs(vec![assignment], propagate).into_iter().next()
             .unwrap_or_else(|| panic!("No assignments found after propagation with {:?}", assignment));
     }
 
@@ -838,7 +843,72 @@ impl Pldag {
                 None
             }
         }).collect();
-        self.propagate_coefs(&assignments)
+        self.propagate_coefs(&assignments, true)
+    }
+
+    #[cfg(feature = "glpk")]
+    /// Solve the supplied objectives in-process with GLPK.
+    /// Only available when the crate is compiled with `--features glpk`
+    /// 
+    /// # Arguments
+    /// * `objectives` - Vector of ID to value mapping representing different objective functions to solve
+    /// * `assume` - Fixed variable assignments to apply before solving
+    /// * `maximize` - If true, maximizes the objective; if false, minimizes it
+    /// 
+    /// # Returns
+    /// Vector of optional valued assignments, one for each objective. None if infeasible.
+    pub fn solve(&self, objectives: Vec<HashMap<String, f64>>, assume: HashMap<String, Bound>, maximize: bool) -> Vec<Option<Assignment>> {
+        use glpk_rust::{solve_ilps, SparseLEIntegerPolyhedron, IntegerSparseMatrix, Variable, Shape, Solution, Status};
+        
+        // Convert the PL-DAG to a polyhedron representation
+        let polyhedron = self.to_sparse_polyhedron(true, true, true);
+
+        // Convert sparse matrix to the format expected by glpk-rust
+        let mut glpk_matrix = SparseLEIntegerPolyhedron {
+            A: IntegerSparseMatrix {
+                rows: polyhedron.A.rows.iter().map(|&x| x as i32).collect(),
+                cols: polyhedron.A.cols.iter().map(|&x| x as i32).collect(),
+                vals: polyhedron.A.vals.iter().map(|&x| -1*x as i32).collect(),
+                shape: Shape { 
+                    nrows: polyhedron.A.shape.0, 
+                    ncols: polyhedron.A.shape.1 
+                },
+            },
+            b: polyhedron.b.iter().map(|&x| (0, -1*x as i32)).collect(),
+            variables: self.nodes.iter()
+                .map(|(key, node)| {
+                    Variable {
+                        id: key.clone(),
+                        bound: match &node.expression {
+                            BoolExpression::Primitive(bound) => {
+                                let bound_to_use = assume.get(key).unwrap_or(bound);
+                                (bound_to_use.0 as i32, bound_to_use.1 as i32)
+                            },
+                            BoolExpression::Composite(_) => {
+                                let bound_to_use = assume.get(key).unwrap_or(&(0, 1));
+                                (bound_to_use.0 as i32, bound_to_use.1 as i32)
+                            },
+                        },
+                    }
+                })
+                .collect(),
+            double_bound: false,
+        };
+
+        let solutions: Vec<Solution> = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
+
+        return solutions.iter().map(|solution| {
+            if solution.status == Status::Optimal {
+                let mut assignment: Assignment = IndexMap::new();
+                for col_name in polyhedron.columns.iter() {
+                    let value = solution.solution.get(col_name).unwrap_or(&0);
+                    assignment.insert(col_name.clone(), (*value, *value));
+                }
+                Some(assignment)
+            } else {
+                None
+            }
+        }).collect();
     }
     
     /// Retrieves the objective function coefficients from all primitive nodes.
@@ -1834,7 +1904,7 @@ mod tests {
         assignments.insert("x".to_string(), (1, 1));
         assignments.insert("y".to_string(), (1, 1));
         
-        let propagated = model.propagate_coefs(&assignments);
+        let propagated = model.propagate_coefs(&assignments, true);
         
         // Check the results: bounds should be (1,1) and coefficients should be accumulated
         assert_eq!(propagated.get("x").unwrap().0, (1, 1)); // bounds
@@ -1889,25 +1959,25 @@ mod tests {
         pldag.set_coef("z".to_string(), 3.0);
         // Add a discount value if the root is true
         pldag.set_coef(root.clone(), -1.0);
-        let scores = pldag.propagate_coefs(&inputs);
+        let scores = pldag.propagate_coefs(&inputs, true);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // And notice what will happen if we remove the x value (i.e. x being (0,1))
         inputs.insert("x".to_string(), (0,1));
-        let scores = pldag.propagate_coefs(&inputs);
+        let scores = pldag.propagate_coefs(&inputs, true);
         // The root will return bounds with coefficient range meaning the value is between bounds with not enough information to
         // determine the exact value. 
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // .. and if we set x to be 0, then the root will be definitely determined.
         inputs.insert("x".to_string(), (0,0));
-        let scores = pldag.propagate_coefs(&inputs);
+        let scores = pldag.propagate_coefs(&inputs, true);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // .. and if we set y and z to be 0, then the root will be 0.
         inputs.insert("y".to_string(), (0,0));
         inputs.insert("z".to_string(), (0,0));
-        let scores = pldag.propagate_coefs(&inputs);
+        let scores = pldag.propagate_coefs(&inputs, true);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
     }
 

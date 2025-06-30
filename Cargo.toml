@@ -1,16 +1,39 @@
 [package]
-name = "pldag-rust"
-version = "2.0.0"
-edition = "2021"
-description = "A DAG-based framework where nodes encode arbitrary Boolean operations over literal leaves, with built-in support for assignment propagation and ILP export."
-license = "MIT"
+name        = "pldag"
+version     = "2.0.1"
+edition     = "2021"
+description = "A DAG-based combinatorial-model framework with optional GLPK solving back-end."
+license     = "MIT"
+repository  = "https://github.com/ourstudio-se/pldag-rust"
+homepage    = "https://github.com/ourstudio-se/pldag-rust"
+keywords    = ["ilp", "milp", "combinatorics", "glpk"]
+categories  = ["science", "mathematics", "algorithms"]
 
-[lib]
-name = "pldag"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
+# ───────────────────────────────────────────────────────────
+# 1. Dependencies that are always built
+# ───────────────────────────────────────────────────────────
 [dependencies]
-bimap = "0.6.3"
-indexmap = "2.9.0"
-itertools = "0.14.0"
+bimap      = "0.6.3"
+indexmap   = "2.10.0"
+itertools  = "0.14.0"
+
+# ───────────────────────────────────────────────────────────
+# 2. GLPK FFI crate — *only* compiled if the `glpk` feature
+#    is enabled further below
+# ───────────────────────────────────────────────────────────
+glpk-rust = { version = "0.1.1", optional = true, default-features = false }
+
+# ───────────────────────────────────────────────────────────
+# 3. Feature flags
+#    • default  ⇢ modelling-only, no GPL code
+#    • glpk     ⇢ pulls in the GPL-licensed FFI and links to
+#                libglpk (static or dynamic, whatever the
+#                user’s system provides)
+# ───────────────────────────────────────────────────────────
+[features]
+default = []
+glpk    = ["glpk-rust"]   # additive: once enabled, binary is GPL
+
+[dev-dependencies]
+pldag = { path = ".", features = ["glpk"] }
+
