@@ -1,4 +1,4 @@
-# Primitive Logic Directed Acyclic Graph (PL‑DAG)
+# Primitive L| **🧩 Optional solver** | Turn on the `glpk` feature to link against [GLPK](https://www.gnu.org/software/glpk/) and solve optimization problems in‑process with `solve()`. |gic Directed Acyclic Graph (PL‑DAG)
 
 A **Primitive Logic Directed Acyclic Graph** (PL‑DAG) is a DAG in which every node encodes a logical operation and every leaf represents a literal. Interior nodes freely express arbitrary Boolean combinations of their predecessors—for example, an AND‑node evaluates to `true` only if *all* of its incoming nodes (or leaves) evaluate to `true`. This flexibility makes the PL‑DAG both powerful and easy to work with.
 
@@ -91,6 +91,20 @@ fn get_objective(&self) -> IndexMap<String, f64>;
 fn set_primitive(&mut self, id: ID, bound: Bound);
 ```
 
+### 6. `solve` (Optional GLPK Feature)
+
+```rust
+#[cfg(feature = "glpk")]
+fn solve(
+    &self,
+    objectives: Vec<HashMap<String, f64>>,
+    assume: HashMap<String, Bound>,
+    maximize: bool,
+) -> Vec<Option<Assignment>>;
+```
+
+*Solves integer linear programming problems using GLPK. Takes multiple objective functions, fixed variable assumptions, and returns optimal assignments.*
+
 ---
 
 ## Quick Example
@@ -118,6 +132,53 @@ pldag.set_coef(&root, -1.0);
 let scored = pldag.propagate_coefs_default();
 println!("root value = {:?}", scored[&root].1);
 ```
+
+### 3. Solving with GLPK (Optional Feature)
+
+When the `glpk` feature is enabled, you can solve optimization problems directly:
+
+```rust
+#[cfg(feature = "glpk")]
+use std::collections::HashMap;
+use pldag::{Pldag, Bound};
+
+// Build a simple problem: maximize x + 2y + 3z subject to x ∨ y ∨ z
+let mut pldag = Pldag::new();
+pldag.set_primitive("x".to_string(), (0, 1));
+pldag.set_primitive("y".to_string(), (0, 1)); 
+pldag.set_primitive("z".to_string(), (0, 1));
+let root = pldag.set_or(vec!["x".to_string(), "y".to_string(), "z".to_string()]);
+
+// Set up the objective function: maximize x + 2y + 3z
+let mut objective = HashMap::new();
+objective.insert("x".to_string(), 1.0);
+objective.insert("y".to_string(), 2.0);
+objective.insert("z".to_string(), 3.0);
+
+// Constraints: require that the OR constraint is satisfied
+let mut assumptions = HashMap::new();
+assumptions.insert(root.clone(), (1, 1)); // root must be true
+
+// Solve the optimization problem
+let solutions = pldag.solve(vec![objective], assumptions, true);
+
+if let Some(solution) = &solutions[0] {
+    println!("Optimal solution found:");
+    println!("x = {:?}", solution.get("x"));
+    println!("y = {:?}", solution.get("y"));
+    println!("z = {:?}", solution.get("z"));
+    println!("root = {:?}", solution.get(&root));
+} else {
+    println!("No feasible solution found");
+}
+```
+
+This example demonstrates:
+- **Problem setup**: Creating boolean variables and logical constraints
+- **Objective function**: Defining what to optimize (maximize x + 2y + 3z)
+- **Assumptions**: Fixing certain variables or constraints (root must be true)
+- **Solving**: Using GLPK to find the optimal solution
+- **Result interpretation**: Extracting variable values from the solution
 
 ---
 
