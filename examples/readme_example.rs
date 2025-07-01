@@ -39,11 +39,11 @@ fn main() {
 
     // 2. Score a configuration:
     // We can score a configuration by setting coefficients on nodes.
-    pldag.set_coef("x".to_string(), 1.0);
-    pldag.set_coef("y".to_string(), 2.0);
-    pldag.set_coef("z".to_string(), 3.0);
+    pldag.set_coef("x", 1.0);
+    pldag.set_coef("y", 2.0);
+    pldag.set_coef("z", 3.0);
     // Add a discount value if the root is true
-    pldag.set_coef(root.clone(), -1.0);
+    pldag.set_coef(&root, -1.0);
 
     // Use propagate_coefs to get both bounds and accumulated coefficients
     let scores = pldag.propagate_coefs(&inputs);
@@ -70,4 +70,23 @@ fn main() {
     let scores = pldag.propagate_coefs(&inputs);
     let root_result = scores.get(&root).unwrap();
     println!("Root bounds: {:?}, Score: {:?}", root_result.0, root_result.1);
+
+    // Build a simple OR‑of‑three model
+    let mut pldag = Pldag::new();
+    pldag.set_primitive("x".to_string(), (0, 1));
+    pldag.set_primitive("y".to_string(), (0, 1));
+    pldag.set_primitive("z".to_string(), (0, 1));
+    let root = pldag.set_or(vec!["x".to_string(), "y".to_string(), "z".to_string()]);
+
+    // 1. Validate a combination
+    let validated = pldag.propagate_default();
+    println!("root bound = {:?}", validated[&root]);
+
+    // 2. Optimise with coefficients
+    pldag.set_coef("x", 1.0);
+    pldag.set_coef("y", 2.0);
+    pldag.set_coef("z", 3.0);
+    pldag.set_coef(&root, -1.0);
+    let scored = pldag.propagate_coefs_default();
+    println!("root value = {:?}", scored[&root].1);
 }

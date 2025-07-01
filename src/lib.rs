@@ -761,7 +761,7 @@ impl Pldag {
     /// 
     /// # Returns
     /// Vector of valued assignments, each containing bounds and accumulated coefficients
-    pub fn propagate_many_coefs(&self, assignments: Vec<&Assignment>, propagate: bool) -> Vec<ValuedAssignment> {
+    pub fn propagate_many_coefs(&self, assignments: Vec<&Assignment>) -> Vec<ValuedAssignment> {
         // Calculate transitive dependencies
         let transitive_deps = self.transitive_dependencies();
 
@@ -770,12 +770,7 @@ impl Pldag {
         for assignment in assignments {
 
             // Start with the propagated bounds
-            let result = if propagate {
-                self.propagate(assignment)
-            } else {
-                // If not propagating, use the input assignment directly
-                assignment.clone()
-            };
+            let result = self.propagate(assignment);
     
             let mut valued_assigment: ValuedAssignment = IndexMap::new();
             // Calculate the accumulated coefficients with the new bound result
@@ -821,9 +816,9 @@ impl Pldag {
     /// 
     /// # Panics
     /// Panics if no assignments are returned (should not happen under normal circumstances)
-    pub fn propagate_coefs(&self, assignment: &Assignment, propagate: bool) -> ValuedAssignment {
+    pub fn propagate_coefs(&self, assignment: &Assignment) -> ValuedAssignment {
         // Propagate the assignment through the Pldag
-        return self.propagate_many_coefs(vec![assignment], propagate).into_iter().next()
+        return self.propagate_many_coefs(vec![assignment]).into_iter().next()
             .unwrap_or_else(|| panic!("No assignments found after propagation with {:?}", assignment));
     }
 
@@ -843,7 +838,7 @@ impl Pldag {
                 None
             }
         }).collect();
-        self.propagate_coefs(&assignments, true)
+        self.propagate_coefs(&assignments)
     }
 
     #[cfg(feature = "glpk")]
@@ -1174,9 +1169,9 @@ impl Pldag {
     /// # Arguments
     /// * `id` - The node ID to update
     /// * `coefficient` - The new coefficient value
-    pub fn set_coef(&mut self, id: ID, coefficient: f64) {
+    pub fn set_coef(&mut self, id: &str, coefficient: f64) {
         // Update the coefficient for the given node
-        if let Some(node) = self.nodes.get_mut(&id) {
+        if let Some(node) = self.nodes.get_mut(id) {
             node.coefficient = coefficient;
         }
     }
@@ -1897,14 +1892,14 @@ mod tests {
         let root = model.set_and(vec!["x".to_string(), "y".to_string()]);
         
         // Set coefficients for nodes
-        model.set_coef("x".to_string(), 2.0);
-        model.set_coef("y".to_string(), 3.0);
+        model.set_coef("x", 2.0);
+        model.set_coef("y", 3.0);
         
         let mut assignments = IndexMap::new();
         assignments.insert("x".to_string(), (1, 1));
         assignments.insert("y".to_string(), (1, 1));
         
-        let propagated = model.propagate_coefs(&assignments, true);
+        let propagated = model.propagate_coefs(&assignments);
         
         // Check the results: bounds should be (1,1) and coefficients should be accumulated
         assert_eq!(propagated.get("x").unwrap().0, (1, 1)); // bounds
@@ -1954,30 +1949,30 @@ mod tests {
 
         // 2. Score a configuration:
         // We can score a configuration by setting coefficients on nodes.
-        pldag.set_coef("x".to_string(), 1.0);
-        pldag.set_coef("y".to_string(), 2.0);
-        pldag.set_coef("z".to_string(), 3.0);
+        pldag.set_coef("x", 1.0);
+        pldag.set_coef("y", 2.0);
+        pldag.set_coef("z", 3.0);
         // Add a discount value if the root is true
-        pldag.set_coef(root.clone(), -1.0);
-        let scores = pldag.propagate_coefs(&inputs, true);
+        pldag.set_coef(&root, -1.0);
+        let scores = pldag.propagate_coefs(&inputs);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // And notice what will happen if we remove the x value (i.e. x being (0,1))
         inputs.insert("x".to_string(), (0,1));
-        let scores = pldag.propagate_coefs(&inputs, true);
+        let scores = pldag.propagate_coefs(&inputs);
         // The root will return bounds with coefficient range meaning the value is between bounds with not enough information to
         // determine the exact value. 
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // .. and if we set x to be 0, then the root will be definitely determined.
         inputs.insert("x".to_string(), (0,0));
-        let scores = pldag.propagate_coefs(&inputs, true);
+        let scores = pldag.propagate_coefs(&inputs);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // .. and if we set y and z to be 0, then the root will be 0.
         inputs.insert("y".to_string(), (0,0));
         inputs.insert("z".to_string(), (0,0));
-        let scores = pldag.propagate_coefs(&inputs, true);
+        let scores = pldag.propagate_coefs(&inputs);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
     }
 
@@ -2002,10 +1997,10 @@ mod tests {
         assert_eq!(coeffs.get(&root), None); // Composite nodes should not be included
         
         // Set some coefficients
-        model.set_coef("x".to_string(), 2.5);
-        model.set_coef("y".to_string(), -1.0);
-        model.set_coef("z".to_string(), 3.14);
-        model.set_coef(root.clone(), 10.0); // This should not appear in get_objective
+        model.set_coef("x", 2.5);
+        model.set_coef("y", -1.0);
+        model.set_coef("z", 3.14);
+        model.set_coef(&root, 10.0); // This should not appear in get_objective
         
         // Test that get_objective returns the updated values for primitives only
         let coeffs = model.get_objective();

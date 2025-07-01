@@ -160,7 +160,7 @@ let mut assumptions = HashMap::new();
 assumptions.insert(root.clone(), (1, 1)); // root must be true
 
 // Solve the optimization problem
-let solutions = pldag.solve(vec![objective], assumptions, true);
+let solutions = pldag.solve(vec![objective], assumptions);
 
 if let Some(solution) = &solutions[0] {
     println!("Optimal solution found:");
