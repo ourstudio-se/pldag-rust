@@ -959,7 +959,7 @@ impl Pldag {
         let mut b_vector: Vec<i64> = Vec::new();
 
         // Filter out all BoolExpressions that are primitives
-        let primitives: HashMap<&String, Bound> = self.nodes.iter()
+        let primitives: IndexMap<&String, Bound> = self.nodes.iter()
             .filter_map(|(key, node)| {
                 if let BoolExpression::Primitive(bound) = &node.expression {
                     Some((key, *bound))
@@ -970,7 +970,7 @@ impl Pldag {
             .collect();
 
         // Filter out all BoolExpressions that are composites
-        let composites: HashMap<&String, &Constraint> = self.nodes.iter()
+        let composites: IndexMap<&String, &Constraint> = self.nodes.iter()
             .filter_map(|(key, node)| {
                 if let BoolExpression::Composite(constraint) = &node.expression {
                     Some((key, constraint))
@@ -1065,7 +1065,7 @@ impl Pldag {
         if fixed_constraints {
             // Add the bounds for the primitive variables that are fixed.
             // We start by creating a grouping on the lower and upper bounds of the primitive variables
-            let mut fixed_bound_map: HashMap<i64, Vec<usize>> = HashMap::new();
+            let mut fixed_bound_map: IndexMap<i64, Vec<usize>> = IndexMap::new();
             for (key, bound) in primitives.iter().filter(|(_, bound)| bound_fixed(**bound)) {
                 fixed_bound_map.entry(bound.0).or_insert_with(Vec::new).push(*column_names_map.get(&key.to_string()).unwrap());
             }
@@ -2031,5 +2031,50 @@ mod tests {
         assert!(!coeffs_mixed.contains_key(&composite2));
     }
 
+    #[test]
+    fn test_solve_simple_example() {
+        let mut model = Pldag::new();
+
+        model.set_primitives(
+            vec![
+                "s1".to_string(),
+                "s2".to_string(),
+                "f1".to_string(),
+                "f2".to_string(),
+            ],
+            (0, 1),
+        );
+        let sizes = model.set_xor(vec!["s1".to_string(), "s2".to_string()]);
+        let fabrics = model.set_xor(vec!["f1".to_string(), "f2".to_string()]);
+
+        let root = model.set_and(vec![sizes, fabrics]);
+
+        println!("root: {}", root);
+        let solution = model.solve(
+            vec![HashMap::from([
+                ("s1".to_string(), 1.0),
+                ("s2".to_string(), 1.0), 
+                ("f2".to_string(), 1.0), 
+                ("f1".to_string(), 1.0)]
+            )],
+            HashMap::from([(root.clone(), (1, 1))]),
+            true,
+        );
+        let asd = &solution[0];
+        match asd {
+            None => {}
+            Some(assignments) => {
+                let s1_true = assignments.get(&"s1".to_string()) == Some(&(1, 1));
+                let s2_true = assignments.get(&"s2".to_string()) == Some(&(1,1));
+                assert!((s1_true && !s2_true) || (!s1_true && s2_true));
+
+                let f1_true = assignments.get(&"f1".to_string()) == Some(&(1, 1));
+                let f2_true = assignments.get(&"f2".to_string()) == Some(&(1, 1));
+                assert!((f1_true && !f2_true) || (!f1_true && f2_true));
+
+                assert!(assignments.get(&root) == Some(&(1, 1)));
+            }
+        }
+    }
     
 }
