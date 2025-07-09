@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::{Index, RangeInclusive};
 use itertools::Itertools;
@@ -119,6 +120,18 @@ pub struct SparseIntegerMatrix {
     pub shape: (usize, usize),
 }
 
+impl fmt::Display for SparseIntegerMatrix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+
+        let mut dense_matrix = DenseIntegerMatrix::new(self.shape.0, self.shape.1);
+        for ((&row, &col), &val) in self.rows.iter().zip(&self.cols).zip(&self.vals) {
+            dense_matrix.data[row][col] = val;
+        }        
+        
+        dense_matrix.fmt(f)
+    }
+}
+
 /// Dense representation of an integer matrix.
 /// 
 /// Stores all elements in a 2D vector structure.
@@ -127,6 +140,18 @@ pub struct DenseIntegerMatrix {
     pub data: Vec<Vec<i64>>,
     /// Matrix dimensions: (number_of_rows, number_of_columns)
     pub shape: (usize, usize),
+}
+
+impl fmt::Display for DenseIntegerMatrix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for row in &self.data {
+            for val in row {
+                write!(f, "{:>3} ", val)?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
 }
 
 impl DenseIntegerMatrix {
@@ -2077,4 +2102,30 @@ mod tests {
         }
     }
     
+    #[test]
+    fn test_print_dense_matrix() {
+        let mut matrix = DenseIntegerMatrix::new(3, 3);
+        matrix.data[0][0] = 1;
+        matrix.data[0][2] = 2;
+        matrix.data[1][0] = 3;
+        matrix.data[2][2] = 4;
+
+        let output = format!("{}", matrix);
+        let expected = "  1   0   2 \n  3   0   0 \n  0   0   4 \n";
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_print_sparse_matrix() {
+        let matrix = SparseIntegerMatrix {
+            rows: vec![0, 0, 1, 2],
+            cols: vec![0, 2, 0, 2],
+            vals: vec![1, 2, 3, 4],
+            shape: (3, 3),
+        };
+
+        let output = format!("{}", matrix);
+        let expected = "  1   0   2 \n  3   0   0 \n  0   0   4 \n";
+        assert_eq!(output, expected);
+    }
 }
