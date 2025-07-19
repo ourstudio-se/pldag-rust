@@ -31,9 +31,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "glpk-rust"
-version = "0.1.1"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af55893507720193caf3b7d78f1c4baae0ccc6ab6d37f5e2b57ad5db701f16f9"
+checksum = "86954c30971133ee9621ca0d95a41c125ce5886d4c59435f9dd00414b66c8de5"
 dependencies = [
  "cc",
  "libc",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "pldag"
-version = "2.0.5"
+version = "3.0.0"
 dependencies = [
  "bimap",
  "glpk-rust",
