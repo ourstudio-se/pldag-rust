@@ -44,7 +44,7 @@ Enabling the `glpk` feature links to the GNU Linear Programming Kit (GLPK). If y
 ```rust
 fn propagate(
     &self,
-    assignment: &Assignment, // IndexMap<String, Bound>
+    assignment: &IndexMap<&str, Bound>, // Assignment = IndexMap<String, Bound>
 ) -> Assignment;
 ```
 
@@ -55,7 +55,7 @@ fn propagate(
 ```rust
 fn propagate_coefs(
     &self,
-    assignment: &Assignment,
+    assignment: &IndexMap<&str, Bound>,
 ) -> ValuedAssignment; // IndexMap<String, MultiBound>
 ```
 
@@ -85,10 +85,10 @@ fn to_sparse_polyhedron(
 ### 5. Node management helpers
 
 ```rust
-fn set_coef(&mut self, id: ID, coefficient: f64);
-fn get_coef(&self, id: &ID) -> f64;
+fn set_coef(&mut self, id: &str, coefficient: f64);
+fn get_coef(&self, id: &str) -> f64;
 fn get_objective(&self) -> IndexMap<String, f64>;
-fn set_primitive(&mut self, id: ID, bound: Bound);
+fn set_primitive(&mut self, id: &str, bound: Bound);
 ```
 
 ### 6. `solve` (Optional GLPK Feature)
@@ -97,8 +97,8 @@ fn set_primitive(&mut self, id: ID, bound: Bound);
 #[cfg(feature = "glpk")]
 fn solve(
     &self,
-    objectives: Vec<HashMap<String, f64>>,
-    assume: HashMap<String, Bound>,
+    objectives: Vec<HashMap<&str, f64>>,
+    assume: HashMap<&str, Bound>,
     maximize: bool,
 ) -> Vec<Option<Assignment>>;
 ```
@@ -118,7 +118,7 @@ let mut pldag = Pldag::new();
 pldag.set_primitive("x", (0, 1));
 pldag.set_primitive("y", (0, 1));
 pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(["x", "y", "z"]);
+let root = pldag.set_or(vec!["x", "y", "z"]);
 
 // 1. Validate a combination
 let validated = pldag.propagate_default();
@@ -144,23 +144,23 @@ use pldag::{Pldag, Bound};
 
 // Build a simple problem: maximize x + 2y + 3z subject to x ∨ y ∨ z
 let mut pldag = Pldag::new();
-pldag.set_primitive("x".to_string(), (0, 1));
-pldag.set_primitive("y".to_string(), (0, 1)); 
-pldag.set_primitive("z".to_string(), (0, 1));
-let root = pldag.set_or(vec!["x".to_string(), "y".to_string(), "z".to_string()]);
+pldag.set_primitive("x", (0, 1));
+pldag.set_primitive("y", (0, 1)); 
+pldag.set_primitive("z", (0, 1));
+let root = pldag.set_or(vec!["x", "y", "z"]);
 
 // Set up the objective function: maximize x + 2y + 3z
 let mut objective = HashMap::new();
-objective.insert("x".to_string(), 1.0);
-objective.insert("y".to_string(), 2.0);
-objective.insert("z".to_string(), 3.0);
+objective.insert("x", 1.0);
+objective.insert("y", 2.0);
+objective.insert("z", 3.0);
 
 // Constraints: require that the OR constraint is satisfied
 let mut assumptions = HashMap::new();
-assumptions.insert(root.clone(), (1, 1)); // root must be true
+assumptions.insert(&root, (1, 1)); // root must be true
 
 // Solve the optimization problem
-let solutions = pldag.solve(vec![objective], assumptions);
+let solutions = pldag.solve(vec![objective], assumptions, true);
 
 if let Some(solution) = &solutions[0] {
     println!("Optimal solution found:");
