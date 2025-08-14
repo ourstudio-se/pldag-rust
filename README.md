@@ -20,7 +20,7 @@ A **Primitive Logic Directed Acyclic Graph** (PL‑DAG) is a DAG in which every 
 ### 1  — Modelling‑only (MIT licence)
 
 ```bash
-cargo add pldag-rust
+cargo add pldag
 ```
 
 This pulls *no* GPL code; you can ship the resulting binary under any licence compatible with MIT.
@@ -28,7 +28,7 @@ This pulls *no* GPL code; you can ship the resulting binary under any licence co
 ### 2  — Modelling **+** in‑process GLPK solver (GPL v3+ applies)
 
 ```bash
-cargo add pldag-rust --features glpk
+cargo add pldag --features glpk
 ```
 
 Enabling the `glpk` feature links to the GNU Linear Programming Kit (GLPK). If you **distribute** a binary built with this feature you must meet the requirements of the GPL‑3.0‑or‑later.
