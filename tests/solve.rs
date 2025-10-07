@@ -1105,4 +1105,21 @@ mod glpk_tests {
             }
         }
     }
+
+    #[test]
+    fn test_atleast_with_no_variables_will_result_to_false() {
+        let mut dag = Pldag::new();
+        dag.set_primitive("x", (0, 1));
+        let atleast = dag.set_atleast(vec![], 1);
+        let equiv = dag.set_equiv("x", atleast.as_str());
+        let solutions = dag.solve(
+            vec![HashMap::new()],
+            HashMap::from([
+                (equiv.as_str(), (1, 1)),
+                ("x", (1, 1))
+            ]),
+            true,
+        );
+        assert!(solutions[0].is_none());
+    }
 }

@@ -457,7 +457,7 @@ pub struct Presolved {
     pub fixed:     Assignment,      // id → (v,v)   (0..1 vars only)
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 /// Represents a linear constraint in the form: sum(coeff_i * var_i) + bias >= 0.
 pub struct Constraint {
     /// Vector of (variable_name, coefficient) pairs
@@ -525,7 +525,7 @@ impl Constraint {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 /// Represents different types of boolean expressions in the DAG.
 pub enum BoolExpression {
     /// A composite node representing a linear constraint
@@ -564,6 +564,21 @@ impl Pldag {
         Pldag {
             nodes: IndexMap::new(),
         }
+    }
+
+    fn get_coef_bounds(&self, composite: &Constraint) -> IndexMap<String, Bound> {
+        let mut coef_bounds: IndexMap<String, Bound> = IndexMap::new();
+        for (coef_key, _) in composite.coefficients.iter() {
+            let coef_node = self.nodes.get(coef_key.as_str())
+                .unwrap_or_else(|| panic!("Coefficient key '{}' not found in nodes", coef_key));
+            match &coef_node.expression {
+                BoolExpression::Primitive(bound) => {
+                    coef_bounds.insert(coef_key.clone(), *bound);
+                },
+                _ => {coef_bounds.insert(coef_key.clone(), (0,1));}
+            }
+        }
+        return coef_bounds;
     }
 
     /// Computes the transitive dependency closure for all nodes.
@@ -1144,21 +1159,6 @@ impl Pldag {
     /// A `SparsePolyhedron` representing the DAG constraints
     pub fn to_sparse_polyhedron(&self, double_binding: bool, integer_constraints: bool, fixed_constraints: bool) -> SparsePolyhedron {
 
-        fn get_coef_bounds(composite: &Constraint, nodes: &IndexMap<String, Node>) -> IndexMap<String, Bound> {
-            let mut coef_bounds: IndexMap<String, Bound> = IndexMap::new();
-            for (coef_key, _) in composite.coefficients.iter() {
-                let coef_node = nodes.get(coef_key.as_str())
-                    .unwrap_or_else(|| panic!("Coefficient key '{}' not found in nodes", coef_key));
-                match &coef_node.expression {
-                    BoolExpression::Primitive(bound) => {
-                        coef_bounds.insert(coef_key.clone(), *bound);
-                    },
-                    _ => {coef_bounds.insert(coef_key.clone(), (0,1));}
-                }
-            }
-            return coef_bounds;
-        }
-
         // Create a new sparse matrix
         let mut A_matrix = SparseIntegerMatrix::new();
         let mut b_vector: Vec<i64> = Vec::new();
@@ -1197,13 +1197,13 @@ impl Pldag {
             let ki = *column_names_map.get(key).unwrap();
 
             // Construct the inner bound of the composite
-            let coef_bounds = get_coef_bounds(composite, &self.nodes);
 
-            // An inner bound $\text{ib}(\phi)$ of a 
-            // linear inequality constraint $\phi$ is the sum of all variable's 
-            // step bounds, excl bias and before evaluated with the $\geq$ operator. 
-            // For instance, the inner bound of the linear inequality $-2x + y + z \geq 0$, 
-            // where $x,y,z \in \{0,1\}^3$, is $[-2, 2]$, since the lowest value the 
+            let coef_bounds = self.get_coef_bounds(composite);
+            // An inner bound $\text{ib}(\phi)$ of a
+            // linear inequality constraint $\phi$ is the sum of all variable's
+            // step bounds, excl bias and before evaluated with the $\geq$ operator.
+            // For instance, the inner bound of the linear inequality $-2x + y + z \geq 0$,
+            // where $x,y,z \in \{0,1\}^3$, is $[-2, 2]$, since the lowest value the
             // sum can be is $-2$ (given from the combination $x=1, y=0, z=0$) and the 
             // highest value is $2$ (from $x=0, y=1, z=1$).
             let ib_phi = composite.dot(&coef_bounds);
@@ -1445,11 +1445,34 @@ impl Pldag {
         // Return the hash as a string
         let id = hash;
 
-        // Insert the constraint as a node
-        self.nodes.insert(id.to_string(), Node {
-            expression: BoolExpression::Composite(Constraint { coefficients: coefficient_variables, bias: (bias, bias) }),
-            coefficient: 0.0,
-        });
+        let constraint = Constraint { coefficients: coefficient_variables, bias: (bias, bias) };
+
+        // If the composite is either a contradiction or tautology, we create a primitive instead
+        // and fix it to 0 or 1 respectively.
+        let coef_bounds = self.get_coef_bounds(&constraint);
+        let ib_phi = constraint.dot(&coef_bounds);
+        if (ib_phi.0 + bias) >= 0 {
+            // Tautology: always true
+            self.nodes.insert(id.to_string(), Node {
+                expression: BoolExpression::Primitive((1, 1)),
+                coefficient: 0.0,
+            });
+            return id.to_string();
+        } else if (ib_phi.1 + bias) < 0 {
+            // Contradiction: always false
+            self.nodes.insert(id.to_string(), Node {
+                expression: BoolExpression::Primitive((0, 0)),
+                coefficient: 0.0,
+            });
+            return id.to_string();
+        } else {
+            // Insert the constraint as a node
+            self.nodes.insert(id.to_string(), Node {
+                expression: BoolExpression::Composite(constraint),
+                coefficient: 0.0,
+            });
+        }
+
 
         return id.to_string();
     }
@@ -1662,9 +1685,13 @@ impl Pldag {
         T: Into<String> + Clone,
         U: Into<String> + Clone,
     {
-        let imply_lr = self.set_imply(lhs.clone(), rhs.clone());
-        let imply_rl = self.set_imply(rhs.clone(), lhs.clone());
-        self.set_and(vec![imply_lr, imply_rl])
+        // Convert to strings first to avoid type mismatches
+        let lhs_str: String = lhs.into();
+        let rhs_str: String = rhs.into();
+        
+        let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()]);
+        let imply_rl = self.set_not(vec![rhs_str, lhs_str]);
+        self.set_or(vec![imply_lr, imply_rl])
     }
 }
 
@@ -2343,5 +2370,65 @@ mod tests {
         let output = format!("{}", matrix);
         let expected = "  1   0   2 \n  3   0   0 \n  0   0   4 \n";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_composite_turns_to_primitive() {
+        // When a composite node is either a contradiction or a tautology, it will be simplified to a fixed primitive node (0 if contradiction, 1 if tautology).
+        let mut model = Pldag::new();
+        let a = model.set_and(Vec::<String>::new());
+        let b = model.set_or(Vec::<String>::new());
+        assert_eq!(model.nodes.get(&a).unwrap().expression, BoolExpression::Primitive((1, 1)));
+        assert_eq!(model.nodes.get(&b).unwrap().expression, BoolExpression::Primitive((0, 0)));
+    }
+
+    #[test]
+    fn test_equiv() {
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        model.set_primitive("q", (0, 1));
+        let equiv = model.set_equiv("p", "q");
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
+        
+        model.set_primitive("p", (1, 1));
+        model.set_primitive("q", (0, 1));
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
+        
+        model.set_primitive("p", (1, 1));
+        model.set_primitive("q", (0, 0));
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
+        
+        model.set_primitive("p", (0, 0));
+        model.set_primitive("q", (0, 0));
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
+        
+        model.set_primitive("p", (1, 1));
+        model.set_primitive("q", (1, 1));
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
+    }
+
+    #[test]
+    fn test_imply() {
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        model.set_primitive("q", (0, 1));
+        let equiv = model.set_imply("p", "q");
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
+        
+        model.set_primitive("p", (0, 1));
+        model.set_primitive("q", (1, 1));
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
+        
+        model.set_primitive("p", (1, 1));
+        model.set_primitive("q", (0, 0));
+        let propagated = model.propagate(&IndexMap::new());
+        assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
     }
 }
