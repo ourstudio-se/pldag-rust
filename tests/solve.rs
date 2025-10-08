@@ -1122,4 +1122,53 @@ mod glpk_tests {
         );
         assert!(solutions[0].is_none());
     }
+
+    #[test]
+    fn test_solve_when_composites_turns_to_primitives() {
+        let mut model = Pldag::new();
+        let sand = model.set_and(Vec::<String>::new());
+        let sor = model.set_or(Vec::<String>::new());
+        let solutions = model.solve(
+            vec![HashMap::from([(sand.as_str(), -1.0), (sor.as_str(), 1.0)])],
+            HashMap::new(),
+            true,
+        );
+        let solution = solutions[0].as_ref().unwrap();
+        assert_eq!(*solution.get(sand.as_str()).unwrap(), (1, 1));
+        assert_eq!(*solution.get(sor.as_str()).unwrap(), (0, 0));
+
+        let mut model = Pldag::new();
+        model.set_primitive("x", (0,1));
+        model.set_primitive("y", (0,1));
+        model.set_primitive("z", (0,1));
+        let atmost_taut = model.set_atmost(vec!["x", "y", "z"], 3);
+        let solutions = model.solve(
+            vec![HashMap::from([(atmost_taut.as_str(), -1.0)])],
+            HashMap::new(),
+            true,
+        );
+        let solution = solutions[0].as_ref().unwrap();
+        assert_eq!(*solution.get(atmost_taut.as_str()).unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn test_exactly_one_boolean_selection() {
+        let mut model = Pldag::new();  
+        model.set_primitive("a", (0, 1));
+        model.set_primitive("b", (0, 1));
+        model.set_primitive("c", (0, 1));
+        let xor = model.set_atmost(vec!["a", "b", "c"], 1);
+        
+        let solutions = model.solve(
+            vec![HashMap::from([("a", 1.0), ("b", 1.0), ("c", 1.0)])],
+            HashMap::from([
+                (xor.as_str(), (1, 1))
+            ]),
+            true,
+        );
+        let assignments = solutions[0].as_ref().unwrap();
+        for (id, bound) in assignments {
+            println!("{}: {}", id, bound.0)
+        }
+    }
 }

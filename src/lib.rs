@@ -109,6 +109,7 @@ fn bound_span(b: Bound) -> i64 {
 /// 
 /// Stores only non-zero elements using coordinate format (COO):
 /// - `rows\[i\]`, `cols\[i\]`, `vals\[i\]` represent a non-zero element at position (rows\[i\], cols\[i\]) with value vals\[i\]
+#[derive(Hash, Clone)]
 pub struct SparseIntegerMatrix {
     /// Row indices of non-zero elements
     pub rows: Vec<usize>,
@@ -135,6 +136,7 @@ impl fmt::Display for SparseIntegerMatrix {
 /// Dense representation of an integer matrix.
 /// 
 /// Stores all elements in a 2D vector structure.
+#[derive(Clone)]
 pub struct DenseIntegerMatrix {
     /// Matrix data stored as a vector of rows
     pub data: Vec<Vec<i64>>,
@@ -200,6 +202,7 @@ impl DenseIntegerMatrix {
 /// - A is the constraint matrix
 /// - b is the right-hand side vector
 /// - columns maps matrix columns to variable names
+#[derive(Clone)]
 pub struct DensePolyhedron {
     /// Constraint matrix A
     pub A: DenseIntegerMatrix,
@@ -209,6 +212,24 @@ pub struct DensePolyhedron {
     pub columns: Vec<String>,
     /// Subset of columns that represent integer variables
     pub integer_columns: Vec<String>,
+}
+
+impl fmt::Display for DensePolyhedron {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let space = 4;
+        for col_name in &self.columns {
+            write!(f, "{:>space$} ", &col_name.chars().take(3).collect::<String>())?;
+        }
+        writeln!(f)?;
+        for (ir, row) in self.A.data.iter().enumerate() {
+            for val in row {
+                write!(f, "{:>space$} ", val)?;
+            }
+            write!(f, ">= {:>space$}", self.b[ir])?;
+            writeln!(f)?;
+        }
+        Ok(())
+    }
 }
 
 impl DensePolyhedron {
@@ -383,6 +404,7 @@ impl SparseIntegerMatrix {
 /// Sparse representation of a polyhedron defined by linear constraints.
 /// 
 /// Represents the constraint system Ax >= b in sparse format for memory efficiency.
+#[derive(Hash, Clone)]
 pub struct SparsePolyhedron {
     /// Sparse constraint matrix A
     pub A: SparseIntegerMatrix,
@@ -392,6 +414,15 @@ pub struct SparsePolyhedron {
     pub columns: Vec<String>,
     /// Subset of columns that represent integer variables
     pub integer_columns: Vec<String>,
+}
+
+impl SparsePolyhedron {
+    fn get_hash(&self) -> u64 {
+        let mut state = DefaultHasher::new();
+        // Hash the SparseIntegerMatrix A
+        self.hash(&mut state);
+        state.finish()
+    }
 }
 
 impl From<SparsePolyhedron> for DensePolyhedron {
@@ -457,7 +488,7 @@ pub struct Presolved {
     pub fixed:     Assignment,      // id → (v,v)   (0..1 vars only)
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash)]
 /// Represents a linear constraint in the form: sum(coeff_i * var_i) + bias >= 0.
 pub struct Constraint {
     /// Vector of (variable_name, coefficient) pairs
@@ -525,7 +556,7 @@ impl Constraint {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash)]
 /// Represents different types of boolean expressions in the DAG.
 pub enum BoolExpression {
     /// A composite node representing a linear constraint
@@ -555,6 +586,24 @@ pub struct Pldag {
     pub nodes: IndexMap<ID, Node>,
 }
 
+impl Hash for Pldag {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the nodes in a consistent order
+        for (id, node) in self.nodes.iter().sorted_by(|a, b| a.0.cmp(b.0)) {
+            id.hash(state);
+            node.coefficient.to_bits().hash(state);
+            match &node.expression {
+                BoolExpression::Composite(c) => {
+                    c.hash(state);
+                },
+                BoolExpression::Primitive(b) => {
+                    b.hash(state);
+                }
+            }
+        }
+    }
+}
+
 impl Pldag {
     /// Creates a new empty PL-DAG.
     /// 
@@ -564,6 +613,12 @@ impl Pldag {
         Pldag {
             nodes: IndexMap::new(),
         }
+    }
+
+    pub fn get_hash(&self) -> u64 {
+        let mut state = DefaultHasher::new();
+        self.hash(&mut state);
+        state.finish()
     }
 
     fn get_coef_bounds(&self, composite: &Constraint) -> IndexMap<String, Bound> {
@@ -1073,6 +1128,8 @@ impl Pldag {
         }
 
         // Convert sparse matrix to the format expected by glpk-rust
+        // NOTE: As soon as the polyhedron is made, the order of the columns are vital.
+        // Therefore always use polyhedron.columns to get the variable names in the correct order.
         let mut glpk_matrix = SparseLEIntegerPolyhedron {
             A: IntegerSparseMatrix {
                 rows: polyhedron.A.rows.iter().map(|&x| x as i32).collect(),
@@ -1080,8 +1137,9 @@ impl Pldag {
                 vals: polyhedron.A.vals.iter().map(|&x| -1*x as i32).collect(),
             },
             b: polyhedron.b.iter().map(|&x| (0, -1*x as i32)).collect(),
-            variables: self.nodes.iter()
-                .map(|(key, node)| {
+            variables: polyhedron.columns.iter()
+                .map(|key| {
+                    let node = self.nodes.get(key).unwrap();
                     Variable {
                         id: key.as_str(),
                         bound: match &node.expression {
@@ -1164,7 +1222,7 @@ impl Pldag {
         let mut b_vector: Vec<i64> = Vec::new();
 
         // Filter out all BoolExpressions that are primitives
-        let primitives: IndexMap<&String, Bound> = self.nodes.iter()
+        let primitives: IndexMap<&String, Bound> = self.nodes.iter().sorted_by(|a, b| a.0.cmp(&b.0))
             .filter_map(|(key, node)| {
                 if let BoolExpression::Primitive(bound) = &node.expression {
                     Some((key, *bound))
@@ -1175,7 +1233,7 @@ impl Pldag {
             .collect();
 
         // Filter out all BoolExpressions that are composites
-        let composites: IndexMap<&String, &Constraint> = self.nodes.iter()
+        let composites: IndexMap<&String, &Constraint> = self.nodes.iter().sorted_by(|a, b| a.0.cmp(&b.0))
             .filter_map(|(key, node)| {
                 if let BoolExpression::Composite(constraint) = &node.expression {
                     Some((key, constraint))
@@ -1437,7 +1495,7 @@ impl Pldag {
         for (key, value) in coefficient_variables {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
-        let coefficient_variables: Vec<Coefficient> = unique_coefficients.into_iter().collect();
+        let coefficient_variables: Vec<Coefficient> = unique_coefficients.into_iter().sorted_by(|a, b| a.0.cmp(&b.0)).collect();
 
         // Create a hash from the input data
         let hash = create_hash(&coefficient_variables, bias);
@@ -2107,7 +2165,7 @@ mod tests {
     fn test_chain_dag() {
         // x → [y], y → [z], z → []
         let mut pldag = Pldag::new();
-        pldag.set_primitive("z", (0, 0));
+        pldag.set_primitive("z", (0, 1));
         let y = pldag.set_or(vec!["z"]);
         let x = pldag.set_or(vec![y.clone()]);
         let deps = pldag.transitive_dependencies();
@@ -2430,5 +2488,37 @@ mod tests {
         model.set_primitive("q", (0, 0));
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
+    }
+
+    #[test]
+    fn test_pldag_hash_function() {
+        let mut model1 = Pldag::new();
+        model1.set_primitive("x", (0, 1));
+        model1.set_primitive("y", (0, 1));
+        model1.set_and(vec!["x", "y"]);
+        
+        let mut model2 = Pldag::new();
+        model2.set_primitive("y", (0, 1));
+        model2.set_primitive("x", (0, 1));
+        model2.set_and(vec!["y", "x"]);
+
+        // Check that hash of model1 and model2 are the same
+        assert_eq!(model1.get_hash(), model2.get_hash());
+    }
+
+    #[test]
+    fn test_sparse_polyhedron_from_pldag_hash_function() {
+        let mut model1 = Pldag::new();
+        model1.set_primitive("x", (0, 1));
+        model1.set_primitive("y", (0, 1));
+        model1.set_and(vec!["x", "y"]);
+        let polyhash1 = model1.to_sparse_polyhedron_default().get_hash();
+        
+        let mut model2 = Pldag::new();
+        model2.set_primitive("y", (0, 1));
+        model2.set_primitive("x", (0, 1));
+        model2.set_and(vec!["y", "x"]);
+        let polyhash2 = model2.to_sparse_polyhedron_default().get_hash();
+        assert_eq!(polyhash1, polyhash2);
     }
 }

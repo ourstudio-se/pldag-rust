@@ -182,6 +182,9 @@ This example demonstrates:
 
 ---
 
+## Notes
+- <i>Please note that when a composite is either a tautology (always true) or a contradition (always false), these are automatically transformed into a primitive with fixed bounds set to (0,0) if contradition and (1,1) if tautology.</i>
+
 ## License
 
 * **Library code:** MIT (permissive).
