@@ -118,7 +118,7 @@ let mut pldag = Pldag::new();
 pldag.set_primitive("x", (0, 1));
 pldag.set_primitive("y", (0, 1));
 pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(vec!["x", "y", "z"]);
+let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
 
 // 1. Validate a combination
 let validated = pldag.propagate_default();
@@ -147,7 +147,7 @@ let mut pldag = Pldag::new();
 pldag.set_primitive("x", (0, 1));
 pldag.set_primitive("y", (0, 1)); 
 pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(vec!["x", "y", "z"]);
+let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
 
 // Set up the objective function: maximize x + 2y + 3z
 let mut objective = HashMap::new();
