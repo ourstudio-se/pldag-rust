@@ -1779,6 +1779,16 @@ impl Pldag {
             self.set_or(vec![imply_lr.unwrap(), imply_rl.unwrap()])
         }
     }
+
+    pub fn set_bounds(&mut self, id: &str, bound: Bound) -> bool {
+        if let Some(node) = self.nodes.get_mut(id) {
+            if let BoolExpression::Primitive(b) = &mut node.expression {
+                *b = bound;
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
