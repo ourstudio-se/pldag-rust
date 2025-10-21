@@ -21,7 +21,7 @@ itertools  = "0.14.0"
 # 2. GLPK FFI crate — *only* compiled if the `glpk` feature
 #    is enabled further below
 # ───────────────────────────────────────────────────────────
-glpk-rust = { version = "0.1.8", optional = true, default-features = false }
+glpk-rust = { version = "0.1.9", optional = true, default-features = false }
 
 # ───────────────────────────────────────────────────────────
 # 3. Feature flags
