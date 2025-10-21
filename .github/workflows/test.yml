@@ -27,10 +27,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libglpk-dev
 
-      - name: Set GLPK environment variables
+      - name: Verify GLPK installation
         run: |
-          echo "GLPK_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-          echo "GLPK_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+          dpkg -L libglpk-dev | head -20
+          ls -la /usr/lib/x86_64-linux-gnu/libglpk* || ls -la /usr/lib/libglpk* || echo "GLPK libs not found in standard locations"
+          ls -la /usr/include/glpk.h || echo "GLPK header not found"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
