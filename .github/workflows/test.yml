@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  GLPK_NO_PKG_CONFIG: 1
 
 jobs:
   test:
@@ -25,13 +24,10 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libglpk-dev
+          sudo apt-get install -y build-essential pkg-config libglpk-dev wget
 
-      - name: Verify GLPK installation
-        run: |
-          dpkg -L libglpk-dev | head -20
-          ls -la /usr/lib/x86_64-linux-gnu/libglpk* || ls -la /usr/lib/libglpk* || echo "GLPK libs not found in standard locations"
-          ls -la /usr/include/glpk.h || echo "GLPK header not found"
+      - name: Set PKG_CONFIG_PATH
+        run: echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
 
       - name: Cache cargo registry
         uses: actions/cache@v4
