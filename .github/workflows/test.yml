@@ -26,11 +26,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libglpk-dev
 
-      - name: Verify pkg-config installation
+      - name: Set GLPK environment variables
         run: |
-          which pkg-config
-          pkg-config --version
-          pkg-config --libs glpk
+          echo "GLPK_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "GLPK_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
 
       - name: Cache cargo registry
         uses: actions/cache@v4
