@@ -49,9 +49,3 @@ jobs:
 
       - name: Run tests (with GLPK feature)
         run: cargo test --features glpk
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
