@@ -18,6 +18,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libglpk-dev
+
+      - name: Verify pkg-config installation
+        run: |
+          which pkg-config
+          pkg-config --version
+          pkg-config --libs glpk
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -38,11 +49,6 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libglpk-dev
 
       - name: Run tests (without GLPK feature)
         run: cargo test --no-default-features
