@@ -18,6 +18,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -28,9 +31,6 @@ jobs:
           which pkg-config
           pkg-config --version
           pkg-config --libs glpk
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests (without GLPK feature)
         run: cargo test --no-default-features
