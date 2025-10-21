@@ -1,6 +1,6 @@
-# Primitive Logic Directed Acyclic Graph (PL‑DAG)
+# Propositional Logic Directed Acyclic Graph (PL‑DAG)
 
-A **Primitive Logic Directed Acyclic Graph** (PL‑DAG) is a DAG in which every node encodes a logical operation and every leaf represents a literal. Interior nodes freely express arbitrary Boolean combinations of their predecessors—for example, an AND‑node evaluates to `true` only if *all* of its incoming nodes (or leaves) evaluate to `true`. This flexibility makes the PL‑DAG both powerful and easy to work with.
+A **Propositional Logic Directed Acyclic Graph** (PL‑DAG) is a DAG in which every node encodes a logical operation and every leaf represents a literal. Interior nodes freely express arbitrary Boolean combinations of their predecessors—for example, an AND‑node evaluates to `true` only if *all* of its incoming nodes (or leaves) evaluate to `true`. This flexibility makes the PL‑DAG both powerful and easy to work with.
 
 ---
 
