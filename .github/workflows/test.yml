@@ -39,8 +39,10 @@ jobs:
           path: target
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install GLPK
-        run: sudo apt-get update && sudo apt-get install -y libglpk-dev
+      - name: Install GLPK dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglpk-dev glpk-utils pkg-config
 
       - name: Run tests (without GLPK feature)
         run: cargo test --no-default-features
