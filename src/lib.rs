@@ -1,10 +1,10 @@
+use indexmap::{IndexMap, IndexSet};
+use itertools::Itertools;
 use std::collections::HashSet;
-use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::{Index, RangeInclusive};
-use itertools::Itertools;
-use indexmap::{IndexMap, IndexSet};
 
 /// Represents a bound with minimum and maximum values.
 /// Used to specify the allowed range for variables and constraints.
@@ -14,38 +14,38 @@ pub type Bound = (i64, i64);
 pub type ID = String;
 
 /// Creates a hash from a vector of string-integer pairs and a standalone integer.
-/// 
+///
 /// This function is used to generate unique IDs for constraints by hashing their
 /// coefficients and bias together.
-/// 
+///
 /// # Arguments
 /// * `data` - Vector of (variable_name, coefficient) pairs
 /// * `num` - Additional integer value to include in the hash (typically the bias)
-/// 
+///
 /// # Returns
 /// A 64-bit hash value representing the input data
 fn create_hash(data: &Vec<(String, i64)>, num: i64) -> u64 {
     // Create a new hasher
     let mut hasher = DefaultHasher::new();
-    
+
     // Hash the vector
     for (s, i) in data {
         s.hash(&mut hasher);
         i.hash(&mut hasher);
     }
-    
+
     // Hash the standalone i64 value
     num.hash(&mut hasher);
-    
+
     // Return the final hash value
     hasher.finish()
 }
 
 /// Checks if a bound represents a fixed value (min equals max).
-/// 
+///
 /// # Arguments
 /// * `b` - A bound tuple (min, max)
-/// 
+///
 /// # Returns
 /// `true` if the bound represents a single fixed value, `false` otherwise
 fn bound_fixed(b: Bound) -> bool {
@@ -53,10 +53,10 @@ fn bound_fixed(b: Bound) -> bool {
 }
 
 /// Checks if a bound represents a boolean range [0, 1].
-/// 
+///
 /// # Arguments
 /// * `b` - A bound tuple (min, max)
-/// 
+///
 /// # Returns
 /// `true` if the bound represents a boolean value (0 to 1), `false` otherwise
 fn bound_bool(b: Bound) -> bool {
@@ -64,11 +64,11 @@ fn bound_bool(b: Bound) -> bool {
 }
 
 /// Adds two bounds together element-wise.
-/// 
+///
 /// # Arguments
 /// * `b1` - First bound (min1, max1)
 /// * `b2` - Second bound (min2, max2)
-/// 
+///
 /// # Returns
 /// A new bound (min1 + min2, max1 + max2)
 fn bound_add(b1: Bound, b2: Bound) -> Bound {
@@ -76,29 +76,29 @@ fn bound_add(b1: Bound, b2: Bound) -> Bound {
 }
 
 /// Multiplies a bound by a scalar coefficient.
-/// 
+///
 /// When the coefficient is negative, the min and max values are swapped
 /// to maintain the correct bound ordering.
-/// 
+///
 /// # Arguments
 /// * `k` - Scalar coefficient to multiply by
 /// * `b` - Bound to multiply (min, max)
-/// 
+///
 /// # Returns
 /// A new bound with the multiplication applied
 fn bound_multiply(k: i64, b: Bound) -> Bound {
     if k < 0 {
-        return (k*b.1, k*b.0);
+        return (k * b.1, k * b.0);
     } else {
-        return (k*b.0, k*b.1);
+        return (k * b.0, k * b.1);
     }
 }
 
 /// Calculates the span (range) of a bound.
-/// 
+///
 /// # Arguments
 /// * `b` - A bound tuple (min, max)
-/// 
+///
 /// # Returns
 /// The absolute difference between max and min values
 fn bound_span(b: Bound) -> i64 {
@@ -106,7 +106,7 @@ fn bound_span(b: Bound) -> i64 {
 }
 
 /// Sparse representation of an integer matrix.
-/// 
+///
 /// Stores only non-zero elements using coordinate format (COO):
 /// - `rows\[i\]`, `cols\[i\]`, `vals\[i\]` represent a non-zero element at position (rows\[i\], cols\[i\]) with value vals\[i\]
 #[derive(Hash, Clone)]
@@ -123,18 +123,17 @@ pub struct SparseIntegerMatrix {
 
 impl fmt::Display for SparseIntegerMatrix {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-
         let mut dense_matrix = DenseIntegerMatrix::new(self.shape.0, self.shape.1);
         for ((&row, &col), &val) in self.rows.iter().zip(&self.cols).zip(&self.vals) {
             dense_matrix.data[row][col] = val;
-        }        
-        
+        }
+
         dense_matrix.fmt(f)
     }
 }
 
 /// Dense representation of an integer matrix.
-/// 
+///
 /// Stores all elements in a 2D vector structure.
 #[derive(Clone)]
 pub struct DenseIntegerMatrix {
@@ -158,11 +157,11 @@ impl fmt::Display for DenseIntegerMatrix {
 
 impl DenseIntegerMatrix {
     /// Creates a new dense integer matrix filled with zeros.
-    /// 
+    ///
     /// # Arguments
     /// * `rows` - Number of rows in the matrix
     /// * `cols` - Number of columns in the matrix
-    /// 
+    ///
     /// # Returns
     /// A new `DenseIntegerMatrix` with all elements initialized to zero
     pub fn new(rows: usize, cols: usize) -> DenseIntegerMatrix {
@@ -173,16 +172,16 @@ impl DenseIntegerMatrix {
     }
 
     /// Computes the matrix-vector dot product.
-    /// 
+    ///
     /// Multiplies this matrix by a vector and returns the resulting vector.
     /// The input vector length must match the number of columns in the matrix.
-    /// 
+    ///
     /// # Arguments
     /// * `vector` - Input vector to multiply with
-    /// 
+    ///
     /// # Returns
     /// A vector representing the matrix-vector product
-    /// 
+    ///
     /// # Panics
     /// May panic if the vector length doesn't match the matrix column count
     pub fn dot_product(&self, vector: &Vec<i64>) -> Vec<i64> {
@@ -197,7 +196,7 @@ impl DenseIntegerMatrix {
 }
 
 /// Dense representation of a polyhedron defined by linear constraints.
-/// 
+///
 /// Represents the constraint system Ax >= b where:
 /// - A is the constraint matrix
 /// - b is the right-hand side vector
@@ -218,7 +217,11 @@ impl fmt::Display for DensePolyhedron {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let space = 4;
         for col_name in &self.columns {
-            write!(f, "{:>space$} ", &col_name.chars().take(3).collect::<String>())?;
+            write!(
+                f,
+                "{:>space$} ",
+                &col_name.chars().take(3).collect::<String>()
+            )?;
         }
         writeln!(f)?;
         for (ir, row) in self.A.data.iter().enumerate() {
@@ -234,40 +237,42 @@ impl fmt::Display for DensePolyhedron {
 
 impl DensePolyhedron {
     /// Converts a variable assignment map to a vector ordered by the polyhedron's columns.
-    /// 
+    ///
     /// # Arguments
     /// * `from_assignments` - Map of variable names to their assigned values
-    /// 
+    ///
     /// # Returns
     /// A vector where each position corresponds to a column in the polyhedron,
     /// with values from the assignment map or 0 if not assigned
     pub fn to_vector(&self, from_assignments: &HashMap<String, i64>) -> Vec<i64> {
         let mut vector: Vec<i64> = vec![0; self.columns.len()];
-        for (index, v) in from_assignments
-            .iter()
-            .filter_map(|(k, v)| self.columns.iter().position(|col| col == k).map(|index| (index, v)))
-        {
+        for (index, v) in from_assignments.iter().filter_map(|(k, v)| {
+            self.columns
+                .iter()
+                .position(|col| col == k)
+                .map(|index| (index, v))
+        }) {
             vector[index] = *v;
         }
         vector
     }
 
     /// Creates a new polyhedron by fixing certain variables to specific values.
-    /// 
+    ///
     /// This operation eliminates the specified variables from the polyhedron by
     /// substituting their fixed values into the constraints and removing their columns.
-    /// 
+    ///
     /// # Arguments
     /// * `values` - Map of variable names to their fixed values
-    /// 
+    ///
     /// # Returns
     /// A new `DensePolyhedron` with the specified variables eliminated
     pub fn assume(&self, values: &HashMap<String, i64>) -> DensePolyhedron {
         // 1) Make mutable copies of everything
-        let mut new_A_data   = self.A.data.clone();     // Vec<Vec<i64>>
-        let mut new_b        = self.b.clone();          // Vec<i64>
-        let mut new_columns  = self.columns.clone();    // Vec<String>
-        let mut new_int_cols = self.integer_columns.clone();  // Vec<String>
+        let mut new_A_data = self.A.data.clone(); // Vec<Vec<i64>>
+        let mut new_b = self.b.clone(); // Vec<i64>
+        let mut new_columns = self.columns.clone(); // Vec<String>
+        let mut new_int_cols = self.integer_columns.clone(); // Vec<String>
 
         // 2) Find which columns we’re going to remove, along with their assigned values.
         //    We capture (idx_in_matrix, column_name, assigned_value).
@@ -320,13 +325,13 @@ impl DensePolyhedron {
     }
 
     /// Evaluates the polyhedron constraints against variable bounds.
-    /// 
+    ///
     /// Tests whether the lower and upper bounds of the given variables
     /// satisfy all constraints in the polyhedron.
-    /// 
+    ///
     /// # Arguments
     /// * `assignments` - Map of variable names to their bounds (min, max)
-    /// 
+    ///
     /// # Returns
     /// A bound where:
     /// - .0 is 1 if lower bounds satisfy all constraints, 0 otherwise
@@ -339,12 +344,16 @@ impl DensePolyhedron {
             upper_bounds.insert(key.clone(), bound.1);
         }
 
-        let lower_result = self.A.dot_product(&self.to_vector(&lower_bounds))
+        let lower_result = self
+            .A
+            .dot_product(&self.to_vector(&lower_bounds))
             .iter()
             .zip(&self.b)
             .all(|(a, b)| a >= b);
 
-        let upper_result = self.A.dot_product(&self.to_vector(&upper_bounds))
+        let upper_result = self
+            .A
+            .dot_product(&self.to_vector(&upper_bounds))
             .iter()
             .zip(&self.b)
             .all(|(a, b)| a >= b);
@@ -388,7 +397,7 @@ impl From<DenseIntegerMatrix> for SparseIntegerMatrix {
 
 impl SparseIntegerMatrix {
     /// Creates a new empty sparse integer matrix.
-    /// 
+    ///
     /// # Returns
     /// A new `SparseIntegerMatrix` with no entries and shape (0, 0)
     pub fn new() -> SparseIntegerMatrix {
@@ -402,7 +411,7 @@ impl SparseIntegerMatrix {
 }
 
 /// Sparse representation of a polyhedron defined by linear constraints.
-/// 
+///
 /// Represents the constraint system Ax >= b in sparse format for memory efficiency.
 #[derive(Hash, Clone)]
 pub struct SparsePolyhedron {
@@ -484,8 +493,8 @@ pub type MultiBound = (Bound, VBound);
 pub type ValuedAssignment = IndexMap<ID, MultiBound>;
 
 pub struct Presolved {
-    pub tightened: Pldag,           // the new graph
-    pub fixed:     Assignment,      // id → (v,v)   (0..1 vars only)
+    pub tightened: Pldag,  // the new graph
+    pub fixed: Assignment, // id → (v,v)   (0..1 vars only)
 }
 
 #[derive(Clone, PartialEq, Debug, Hash)]
@@ -499,13 +508,13 @@ pub struct Constraint {
 
 impl Constraint {
     /// Computes the dot product of the constraint coefficients with variable bounds.
-    /// 
+    ///
     /// This calculates the range of possible values for the linear combination
     /// of variables in this constraint, excluding the bias term.
-    /// 
+    ///
     /// # Arguments
     /// * `values` - Map of variable names to their bounds
-    /// 
+    ///
     /// # Returns
     /// A bound representing the min and max possible values of the dot product
     pub fn dot(&self, values: &IndexMap<String, Bound>) -> Bound {
@@ -517,13 +526,13 @@ impl Constraint {
     }
 
     /// Evaluates the constraint against variable bounds.
-    /// 
+    ///
     /// Computes whether the constraint (dot product + bias >= 0) is satisfied
     /// for the given variable bounds.
-    /// 
+    ///
     /// # Arguments
     /// * `values` - Map of variable names to their bounds
-    /// 
+    ///
     /// # Returns
     /// A bound where:
     /// - .0 is 1 if the constraint is satisfied with lower bounds, 0 otherwise
@@ -532,26 +541,25 @@ impl Constraint {
         let bound = self.dot(values);
         return (
             (bound.0 + self.bias.0 >= 0) as i64,
-            (bound.1 + self.bias.1 >= 0) as i64
-        )
+            (bound.1 + self.bias.1 >= 0) as i64,
+        );
     }
 
     /// Creates the negation of this constraint.
-    /// 
+    ///
     /// Transforms the constraint from (ax + b >= 0) to (-ax - b - 1 >= 0),
     /// which is equivalent to (ax + b < 0).
-    /// 
+    ///
     /// # Returns
     /// A new `Constraint` representing the negation of this constraint
     pub fn negate(&self) -> Constraint {
         Constraint {
-            coefficients: self.coefficients.iter().map(|(key, val)| {
-                (key.clone(), -val)
-            }).collect(),
-            bias: (
-                -self.bias.0-1,
-                 -self.bias.1-1
-            ),
+            coefficients: self
+                .coefficients
+                .iter()
+                .map(|(key, val)| (key.clone(), -val))
+                .collect(),
+            bias: (-self.bias.0 - 1, -self.bias.1 - 1),
         }
     }
 }
@@ -574,12 +582,12 @@ pub struct Node {
 }
 
 /// A Primitive Logic Directed Acyclic Graph (PL-DAG).
-/// 
+///
 /// The PL-DAG represents a logical system where:
 /// - Primitive nodes are leaf variables with bounds
 /// - Composite nodes represent logical constraints over other nodes
 /// - Each node has an associated coefficient for accumulation operations
-/// 
+///
 /// The DAG structure ensures no cycles and enables efficient bottom-up propagation.
 pub struct Pldag {
     /// Map from node IDs to their corresponding nodes
@@ -595,7 +603,7 @@ impl Hash for Pldag {
             match &node.expression {
                 BoolExpression::Composite(c) => {
                     c.hash(state);
-                },
+                }
                 BoolExpression::Primitive(b) => {
                     b.hash(state);
                 }
@@ -606,7 +614,7 @@ impl Hash for Pldag {
 
 impl Pldag {
     /// Creates a new empty PL-DAG.
-    /// 
+    ///
     /// # Returns
     /// A new `Pldag` instance with no nodes
     pub fn new() -> Pldag {
@@ -624,20 +632,24 @@ impl Pldag {
     fn get_coef_bounds(&self, composite: &Constraint) -> IndexMap<String, Bound> {
         let mut coef_bounds: IndexMap<String, Bound> = IndexMap::new();
         for (coef_key, _) in composite.coefficients.iter() {
-            let coef_node = self.nodes.get(coef_key.as_str())
+            let coef_node = self
+                .nodes
+                .get(coef_key.as_str())
                 .unwrap_or_else(|| panic!("Coefficient key '{}' not found in nodes", coef_key));
             match &coef_node.expression {
                 BoolExpression::Primitive(bound) => {
                     coef_bounds.insert(coef_key.clone(), *bound);
-                },
-                _ => {coef_bounds.insert(coef_key.clone(), (0,1));}
+                }
+                _ => {
+                    coef_bounds.insert(coef_key.clone(), (0, 1));
+                }
             }
         }
         return coef_bounds;
     }
 
     /// Validates the PL-DAG structure.
-    /// 
+    ///
     /// Checks that all composite nodes only reference existing child nodes.
     /// # Returns
     /// * **`Ok(())`** &nbsp; if the validation passes
@@ -648,7 +660,10 @@ impl Pldag {
             if let BoolExpression::Composite(constraint) = &node.expression {
                 for (child_id, _) in &constraint.coefficients {
                     if !self.nodes.contains_key(child_id) {
-                        return Err(format!("Node '{}' references missing child node '{}'", key, child_id));
+                        return Err(format!(
+                            "Node '{}' references missing child node '{}'",
+                            key, child_id
+                        ));
                     }
                 }
             }
@@ -657,10 +672,10 @@ impl Pldag {
     }
 
     /// Computes the transitive dependency closure for all nodes.
-    /// 
+    ///
     /// For each node in the DAG, this method calculates all nodes that can be
     /// reached by following dependency edges (the set of all descendants).
-    /// 
+    ///
     /// # Returns
     /// A map from each node ID to the set of all node IDs it transitively depends on
     pub fn transitive_dependencies(&self) -> HashMap<ID, HashSet<ID>> {
@@ -678,11 +693,11 @@ impl Pldag {
     }
 
     /// Helper function to recursively collect dependencies with memoization.
-    /// 
+    ///
     /// # Arguments
     /// * `node` - The node to collect dependencies for
     /// * `memo` - Memoization cache to avoid recomputing dependencies
-    /// 
+    ///
     /// # Returns
     /// The set of all nodes that the given node transitively depends on
     fn _collect_deps(&self, node: &ID, memo: &mut HashMap<ID, HashSet<ID>>) -> HashSet<ID> {
@@ -777,14 +792,14 @@ impl Pldag {
     /// may trigger `unwrap()` panics inside the implementation.
     pub fn presolve(&self, seed: &IndexMap<&str, Bound>) -> Result<Presolved, String> {
         // ------------ Phase 0: initial bounds table ------------------------
-        let mut bounds: Assignment = seed.iter()
-            .map(|(k, v)| (k.to_string(), *v))
-            .collect();
+        let mut bounds: Assignment = seed.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         for (id, node) in &self.nodes {
-            bounds.entry(id.clone()).or_insert_with(|| match node.expression {
-                BoolExpression::Primitive(b) => b,
-                _                            => (0, 1), // composite starts open
-            });
+            bounds
+                .entry(id.clone())
+                .or_insert_with(|| match node.expression {
+                    BoolExpression::Primitive(b) => b,
+                    _ => (0, 1), // composite starts open
+                });
         }
 
         // ------------ Phase 1: propagate (same loop as previous answer) ----
@@ -798,16 +813,20 @@ impl Pldag {
         while let Some(cid) = q.pop_front() {
             if let Some(pvec) = parents.get(&cid) {
                 for pid in pvec {
-                    let BoolExpression::Composite(row) = &self.nodes[pid].expression else { continue };
+                    let BoolExpression::Composite(row) = &self.nodes[pid].expression else {
+                        continue;
+                    };
                     let new = row.evaluate(&bounds);
 
-                    if new == (0, 0) {                  // UNSAT row
+                    if new == (0, 0) {
+                        // UNSAT row
                         return Err(pid.clone());
                     }
                     let ent = bounds.entry(pid.clone()).or_insert(new);
                     if *ent != new {
                         *ent = new;
-                        if new.0 == new.1 {             // became fixed
+                        if new.0 == new.1 {
+                            // became fixed
                             q.push_back(pid.clone());
                         }
                     }
@@ -817,11 +836,12 @@ impl Pldag {
 
         // ------------ Phase 2: build the tightened DAG ---------------------
         let mut tightened_nodes = IndexMap::<String, Node>::new();
-        let mut fixed_map       = Assignment::new();
+        let mut fixed_map = Assignment::new();
 
         for (id, node) in &self.nodes {
             let b = bounds[id];
-            if b.0 == b.1 {                      // fixed variable / row
+            if b.0 == b.1 {
+                // fixed variable / row
                 fixed_map.insert(id.clone(), b);
 
                 // Represent it as a primitive with that bound.
@@ -841,27 +861,33 @@ impl Pldag {
                 };
                 tightened_nodes.insert(
                     id.clone(),
-                    Node { expression: new_expr, coefficient: node.coefficient },
+                    Node {
+                        expression: new_expr,
+                        coefficient: node.coefficient,
+                    },
                 );
             }
         }
 
         Ok(Presolved {
-            tightened: Pldag { nodes: tightened_nodes },
+            tightened: Pldag {
+                nodes: tightened_nodes,
+            },
             fixed: fixed_map,
         })
     }
 
     /// Generates all possible combinations of primitive variable assignments.
-    /// 
+    ///
     /// Enumerates the Cartesian product of all primitive variable bounds,
     /// yielding every possible complete assignment of values to primitive variables.
-    /// 
+    ///
     /// # Returns
     /// An iterator over all possible variable assignments as HashMaps
     pub fn primitive_combinations(&self) -> impl Iterator<Item = HashMap<ID, i64>> {
         // 1. Pull out [(var_name, (low, high)), …]
-        let primitives: Vec<(String, (i64, i64))> = self.nodes
+        let primitives: Vec<(String, (i64, i64))> = self
+            .nodes
             .iter()
             .filter_map(|(key, node)| {
                 if let BoolExpression::Primitive(bound) = &node.expression {
@@ -896,19 +922,19 @@ impl Pldag {
     }
 
     /// Propagates bounds through the DAG bottom-up.
-    /// 
+    ///
     /// Starting from the given variable assignments, this method computes bounds
     /// for all composite nodes by propagating constraints upward through the DAG.
-    /// 
+    ///
     /// # Arguments
     /// * `assignment` - Initial assignment of bounds to variables
-    /// 
+    ///
     /// # Returns
     /// Complete assignment including bounds for all reachable nodes
     pub fn propagate(&self, assignment: &IndexMap<&str, Bound>) -> Assignment {
-
         // Convert &str keys to String keys for internal storage
-        let mut result: Assignment = assignment.iter()
+        let mut result: Assignment = assignment
+            .iter()
             .map(|(k, v)| (k.to_string(), *v))
             .collect();
 
@@ -921,23 +947,26 @@ impl Pldag {
             }
         }
 
-        // S = All composites that 
+        // S = All composites that
         // (1) have only primitive variables as input and
         // (2) are not present in `result/assignments`
-        let mut S: VecDeque<String> = self.nodes
+        let mut S: VecDeque<String> = self
+            .nodes
             .iter()
-            .filter(|(key, node)| {
-                match &node.expression {
-                    BoolExpression::Composite(composite) => {
-                    composite.coefficients.iter().all(|x| {
-                        match self.nodes.get(&x.0) {
-                        Some(node_data) => matches!(node_data.expression, BoolExpression::Primitive(_)),
-                        _ => false
-                        }
-                    }) && !result.contains_key(key.as_str())
-                    },
-                    BoolExpression::Primitive(_) => false,
+            .filter(|(key, node)| match &node.expression {
+                BoolExpression::Composite(composite) => {
+                    composite
+                        .coefficients
+                        .iter()
+                        .all(|x| match self.nodes.get(&x.0) {
+                            Some(node_data) => {
+                                matches!(node_data.expression, BoolExpression::Primitive(_))
+                            }
+                            _ => false,
+                        })
+                        && !result.contains_key(key.as_str())
                 }
+                BoolExpression::Primitive(_) => false,
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -949,7 +978,6 @@ impl Pldag {
 
         // Iterate until S is empty
         while let Some(s) = S.pop_front() {
-
             // If we have already visited this node, skip it
             if visited.contains(&s) {
                 panic!("Cycle detected in the graph");
@@ -957,32 +985,31 @@ impl Pldag {
 
             // Mark the current node as visited
             visited.insert(s.clone());
-            
+
             // Start by propagating the bounds from current_id's children
             // to current_id
             match self.nodes.get(&s) {
                 Some(node_data) => {
                     if let BoolExpression::Composite(composite) = &node_data.expression {
-                        result.insert(
-                            s.clone(), 
-                            composite.evaluate(&result)
-                        );
-            
+                        result.insert(s.clone(), composite.evaluate(&result));
+
                         // Now find all composites having `current_id` as its input.
                         // And if that composite's children are in `result`, then add to S.
-                        let incoming = self.nodes
+                        let incoming = self
+                            .nodes
                             .iter()
                             .filter(|(key, node)| {
-                                !result.contains_key(key.as_str()) && match &node.expression {
-                                    BoolExpression::Composite(sub_composite) => {
-                                        sub_composite.coefficients.iter().any(|x| x.0 == s)
-                                    },
-                                    _ => false
-                                }
+                                !result.contains_key(key.as_str())
+                                    && match &node.expression {
+                                        BoolExpression::Composite(sub_composite) => {
+                                            sub_composite.coefficients.iter().any(|x| x.0 == s)
+                                        }
+                                        _ => false,
+                                    }
                             })
                             .map(|(key, _)| key.clone())
                             .collect::<Vec<String>>();
-            
+
                         // Add the incoming composites to S without any checks
                         for incoming_id in incoming {
                             if !S.contains(&incoming_id) {
@@ -990,55 +1017,61 @@ impl Pldag {
                             }
                         }
                     }
-                },
+                }
                 _ => {}
             }
         }
 
         return result;
     }
-    
+
     /// Propagates bounds using default primitive variable bounds.
-    /// 
+    ///
     /// Convenience method that calls `propagate` with the default bounds
     /// of all primitive variables as defined in the DAG.
-    /// 
+    ///
     /// # Returns
     /// Complete assignment with bounds for all nodes
     pub fn propagate_default(&self) -> Assignment {
-        let assignments: IndexMap<&str, Bound> = self.nodes.iter().filter_map(|(key, node)| {
-            if let BoolExpression::Primitive(bound) = &node.expression {
-                Some((key.as_str(), *bound))
-            } else {
-                None
-            }
-        }).collect();
+        let assignments: IndexMap<&str, Bound> = self
+            .nodes
+            .iter()
+            .filter_map(|(key, node)| {
+                if let BoolExpression::Primitive(bound) = &node.expression {
+                    Some((key.as_str(), *bound))
+                } else {
+                    None
+                }
+            })
+            .collect();
         self.propagate(&assignments)
     }
 
     /// Propagates bounds and accumulates coefficients for multiple assignments.
-    /// 
+    ///
     /// For each input assignment, this method:
     /// 1. Propagates bounds through the DAG
     /// 2. Accumulates coefficients where each parent's coefficient is the sum
     ///    of its children's coefficients plus its own coefficient
-    /// 
+    ///
     /// # Arguments
     /// * `assignments` - Vector of assignments to process
-    /// 
+    ///
     /// # Returns
     /// Vector of valued assignments, each containing bounds and accumulated coefficients
-    pub fn propagate_many_coefs(&self, assignments: Vec<&IndexMap<&str, Bound>>) -> Vec<ValuedAssignment> {
+    pub fn propagate_many_coefs(
+        &self,
+        assignments: Vec<&IndexMap<&str, Bound>>,
+    ) -> Vec<ValuedAssignment> {
         // Calculate transitive dependencies
         let transitive_deps = self.transitive_dependencies();
 
         let mut assignment_results: Vec<ValuedAssignment> = Vec::new();
-        
-        for assignment in assignments {
 
+        for assignment in assignments {
             // Start with the propagated bounds
             let result = self.propagate(assignment);
-    
+
             let mut valued_assigment: ValuedAssignment = IndexMap::new();
             // Calculate the accumulated coefficients with the new bound result
             for (key, deps) in transitive_deps.iter() {
@@ -1062,66 +1095,84 @@ impl Pldag {
                     valued_assigment.insert(key.clone(), (*bound, coef_sum));
                 }
             }
-    
+
             // Return the accumulated coefficients
             assignment_results.push(valued_assigment);
         }
 
         return assignment_results;
-
     }
 
     /// Propagates bounds and accumulates coefficients for a single assignment.
-    /// 
+    ///
     /// Convenience method that calls `propagate_many_coefs` with a single assignment.
-    /// 
+    ///
     /// # Arguments
     /// * `assignment` - The assignment to propagate
-    /// 
+    ///
     /// # Returns
     /// A valued assignment containing bounds and accumulated coefficients for all nodes
-    /// 
+    ///
     /// # Panics
     /// Panics if no assignments are returned (should not happen under normal circumstances)
     pub fn propagate_coefs(&self, assignment: &IndexMap<&str, Bound>) -> ValuedAssignment {
         // Propagate the assignment through the Pldag
-        return self.propagate_many_coefs(vec![assignment]).into_iter().next()
-            .unwrap_or_else(|| panic!("No assignments found after propagation with {:?}", assignment));
+        return self
+            .propagate_many_coefs(vec![assignment])
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                panic!(
+                    "No assignments found after propagation with {:?}",
+                    assignment
+                )
+            });
     }
 
     /// Propagates bounds and coefficients using default primitive bounds.
-    /// 
+    ///
     /// Convenience method that calls `propagate_coefs` with the default bounds
     /// of all primitive variables.
-    /// 
+    ///
     /// # Returns
     /// A valued assignment with bounds and coefficients for all nodes
     pub fn propagate_coefs_default(&self) -> ValuedAssignment {
         // Propagate the default assignment through the Pldag
-        let assignments: IndexMap<&str, Bound> = self.nodes.iter().filter_map(|(key, node)| {
-            if let BoolExpression::Primitive(bound) = &node.expression {
-                Some((key.as_str(), *bound))
-            } else {
-                None
-            }
-        }).collect();
+        let assignments: IndexMap<&str, Bound> = self
+            .nodes
+            .iter()
+            .filter_map(|(key, node)| {
+                if let BoolExpression::Primitive(bound) = &node.expression {
+                    Some((key.as_str(), *bound))
+                } else {
+                    None
+                }
+            })
+            .collect();
         self.propagate_coefs(&assignments)
     }
 
     #[cfg(feature = "glpk")]
     /// Solve the supplied objectives in-process with GLPK.
     /// Only available when the crate is compiled with `--features glpk`
-    /// 
+    ///
     /// # Arguments
     /// * `objectives` - Vector of ID to value mapping representing different objective functions to solve
     /// * `assume` - Fixed variable assignments to apply before solving
     /// * `maximize` - If true, maximizes the objective; if false, minimizes it
-    /// 
+    ///
     /// # Returns
     /// Vector of optional valued assignments, one for each objective. None if infeasible.
-    pub fn solve(&self, objectives: Vec<HashMap<&str, f64>>, assume: HashMap<&str, Bound>, maximize: bool) -> Result<Vec<Option<Assignment>>, String> {
-        use glpk_rust::{solve_ilps, SparseLEIntegerPolyhedron, IntegerSparseMatrix, Variable, Solution, Status};
-        
+    pub fn solve(
+        &self,
+        objectives: Vec<HashMap<&str, f64>>,
+        assume: HashMap<&str, Bound>,
+        maximize: bool,
+    ) -> Result<Vec<Option<Assignment>>, String> {
+        use glpk_rust::{
+            solve_ilps, IntegerSparseMatrix, Solution, SparseLEIntegerPolyhedron, Status, Variable,
+        };
+
         // Convert the PL-DAG to a polyhedron representation
         let polyhedron = self.to_sparse_polyhedron(true, true, true)?;
 
@@ -1135,14 +1186,14 @@ impl Pldag {
                             // Return infeasible solution for all objectives if any assumption is out of bounds
                             return Ok(vec![None; objectives.len()]);
                         }
-                    },
+                    }
                     BoolExpression::Composite(_) => {
                         // Composite nodes do not have bounds, so we assume (0, 1) by default
                         if bound.0 < 0 || bound.1 > 1 {
                             // Return infeasible solution for all objectives if any assumption is out of bounds
                             return Ok(vec![None; objectives.len()]);
                         }
-                    }, // Default for composite nodes
+                    } // Default for composite nodes
                 };
             }
         }
@@ -1154,10 +1205,12 @@ impl Pldag {
             A: IntegerSparseMatrix {
                 rows: polyhedron.A.rows.iter().map(|&x| x as i32).collect(),
                 cols: polyhedron.A.cols.iter().map(|&x| x as i32).collect(),
-                vals: polyhedron.A.vals.iter().map(|&x| -1*x as i32).collect(),
+                vals: polyhedron.A.vals.iter().map(|&x| -1 * x as i32).collect(),
             },
-            b: polyhedron.b.iter().map(|&x| (0, -1*x as i32)).collect(),
-            variables: polyhedron.columns.iter()
+            b: polyhedron.b.iter().map(|&x| (0, -1 * x as i32)).collect(),
+            variables: polyhedron
+                .columns
+                .iter()
                 .map(|key| {
                     let node = self.nodes.get(key).unwrap();
                     Variable {
@@ -1166,11 +1219,11 @@ impl Pldag {
                             BoolExpression::Primitive(bound) => {
                                 let bound_to_use = assume.get(key.as_str()).unwrap_or(bound);
                                 (bound_to_use.0 as i32, bound_to_use.1 as i32)
-                            },
+                            }
                             BoolExpression::Composite(_) => {
                                 let bound_to_use = assume.get(key.as_str()).unwrap_or(&(0, 1));
                                 (bound_to_use.0 as i32, bound_to_use.1 as i32)
-                            },
+                            }
                         },
                     }
                 })
@@ -1190,53 +1243,63 @@ impl Pldag {
 
         let solutions: Vec<Solution> = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
 
-        return Ok(solutions.iter().map(|solution| {
-            if solution.status == Status::Optimal {
-                let mut assignment: Assignment = IndexMap::new();
-                for col_name in polyhedron.columns.iter() {
-                    let value = solution.solution.get(col_name).unwrap_or(&0);
-                    assignment.insert(col_name.clone(), (*value, *value));
+        return Ok(solutions
+            .iter()
+            .map(|solution| {
+                if solution.status == Status::Optimal {
+                    let mut assignment: Assignment = IndexMap::new();
+                    for col_name in polyhedron.columns.iter() {
+                        let value = solution.solution.get(col_name).unwrap_or(&0);
+                        assignment.insert(col_name.clone(), (*value, *value));
+                    }
+                    Some(assignment)
+                } else {
+                    None
                 }
-                Some(assignment)
-            } else {
-                None
-            }
-        }).collect());
+            })
+            .collect());
     }
-    
+
     /// Retrieves the objective function coefficients from all primitive nodes.
-    /// 
+    ///
     /// Collects the coefficients of all primitive (leaf) nodes in the DAG,
     /// which represent the objective function values for ILP optimization.
     /// Composite nodes are excluded from the result.
-    /// 
+    ///
     /// # Returns
     /// A map from primitive variable names to their objective coefficients
     pub fn get_objective(&self) -> IndexMap<String, f64> {
         // Collect objective coefficients from primitive nodes
-        self.nodes.iter().filter_map(|(key, node)| {
-            if let BoolExpression::Primitive(_) = &node.expression {
-                Some((key.clone(), node.coefficient))
-            } else {
-                None
-            }
-        }).collect()
+        self.nodes
+            .iter()
+            .filter_map(|(key, node)| {
+                if let BoolExpression::Primitive(_) = &node.expression {
+                    Some((key.clone(), node.coefficient))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
-    
+
     /// Converts the PL-DAG to a sparse polyhedron for ILP solving.
-    /// 
+    ///
     /// Transforms the logical constraints in the DAG into a system of linear
     /// inequalities suitable for integer linear programming solvers.
-    /// 
+    ///
     /// # Arguments
     /// * `double_binding` - If true, creates bidirectional implications for composite nodes
     /// * `integer_constraints` - If true, adds bounds constraints for integer variables
     /// * `fixed_constraints` - If true, adds equality constraints for fixed primitive variables
-    /// 
+    ///
     /// # Returns
     /// A `SparsePolyhedron` representing the DAG constraints
-    pub fn to_sparse_polyhedron(&self, double_binding: bool, integer_constraints: bool, fixed_constraints: bool) -> Result<SparsePolyhedron, String> {
-
+    pub fn to_sparse_polyhedron(
+        &self,
+        double_binding: bool,
+        integer_constraints: bool,
+        fixed_constraints: bool,
+    ) -> Result<SparsePolyhedron, String> {
         // Validate the PL-DAG before conversion
         self.validate()?;
 
@@ -1245,7 +1308,10 @@ impl Pldag {
         let mut b_vector: Vec<i64> = Vec::new();
 
         // Filter out all BoolExpressions that are primitives
-        let primitives: IndexMap<&String, Bound> = self.nodes.iter().sorted_by(|a, b| a.0.cmp(&b.0))
+        let primitives: IndexMap<&String, Bound> = self
+            .nodes
+            .iter()
+            .sorted_by(|a, b| a.0.cmp(&b.0))
             .filter_map(|(key, node)| {
                 if let BoolExpression::Primitive(bound) = &node.expression {
                     Some((key, *bound))
@@ -1256,7 +1322,10 @@ impl Pldag {
             .collect();
 
         // Filter out all BoolExpressions that are composites
-        let composites: IndexMap<&String, &Constraint> = self.nodes.iter().sorted_by(|a, b| a.0.cmp(&b.0))
+        let composites: IndexMap<&String, &Constraint> = self
+            .nodes
+            .iter()
+            .sorted_by(|a, b| a.0.cmp(&b.0))
             .filter_map(|(key, node)| {
                 if let BoolExpression::Composite(constraint) = &node.expression {
                     Some((key, constraint))
@@ -1267,13 +1336,17 @@ impl Pldag {
             .collect();
 
         // Create a index mapping for all columns
-        let column_names_map: IndexMap<String, usize> = primitives.keys().chain(composites.keys()).enumerate().map(|(i, key)| ((*key).clone(), i)).collect();
+        let column_names_map: IndexMap<String, usize> = primitives
+            .keys()
+            .chain(composites.keys())
+            .enumerate()
+            .map(|(i, key)| ((*key).clone(), i))
+            .collect();
 
         // Keep track of the current row index
         let mut row_i: usize = 0;
 
         for (key, composite) in composites {
-
             // Get the index of the current key
             let ki = *column_names_map.get(key).unwrap();
 
@@ -1285,13 +1358,13 @@ impl Pldag {
             // step bounds, excl bias and before evaluated with the $\geq$ operator.
             // For instance, the inner bound of the linear inequality $-2x + y + z \geq 0$,
             // where $x,y,z \in \{0,1\}^3$, is $[-2, 2]$, since the lowest value the
-            // sum can be is $-2$ (given from the combination $x=1, y=0, z=0$) and the 
+            // sum can be is $-2$ (given from the combination $x=1, y=0, z=0$) and the
             // highest value is $2$ (from $x=0, y=1, z=1$).
             let ib_phi = composite.dot(&coef_bounds);
 
-            // 1. Let $d = max(|ib(phi)|)$. 
+            // 1. Let $d = max(|ib(phi)|)$.
             let d_pi = std::cmp::max(ib_phi.0.abs(), ib_phi.1.abs());
-            
+
             // Push values for pi variable coefficient
             A_matrix.rows.push(row_i);
             A_matrix.cols.push(ki);
@@ -1310,13 +1383,12 @@ impl Pldag {
             b_vector.push(-1 * b_phi);
 
             if double_binding {
-
                 // ## Transforming $\phi \rightarrow \pi$
-                // First note that $\phi \rightarrow \pi$ is equivilant to $\neg \phi \lor \pi$. 
+                // First note that $\phi \rightarrow \pi$ is equivilant to $\neg \phi \lor \pi$.
 
                 // 1. Calculate $\phi' = \neg \phi$
-                // 2. Let $d = \text{max}(|\text{ib}(\phi')|)$ 
-                // 3. Append $(d - \text{bias}(\phi'))\pi$ to left side of $\phi'$. 
+                // 2. Let $d = \text{max}(|\text{ib}(\phi')|)$
+                // 3. Append $(d - \text{bias}(\phi'))\pi$ to left side of $\phi'$.
                 // 4. Let bias be as is
 
                 let phi_prim = composite.negate();
@@ -1353,9 +1425,12 @@ impl Pldag {
             // We start by creating a grouping on the lower and upper bounds of the primitive variables
             let mut fixed_bound_map: IndexMap<i64, Vec<usize>> = IndexMap::new();
             for (key, bound) in primitives.iter().filter(|(_, bound)| bound_fixed(**bound)) {
-                fixed_bound_map.entry(bound.0).or_insert_with(Vec::new).push(*column_names_map.get(key.as_str()).unwrap());
+                fixed_bound_map
+                    .entry(bound.0)
+                    .or_insert_with(Vec::new)
+                    .push(*column_names_map.get(key.as_str()).unwrap());
             }
-    
+
             for (v, primitive_ids) in fixed_bound_map.iter() {
                 let b = *v * primitive_ids.len() as i64;
                 for i in vec![-1, 1] {
@@ -1374,21 +1449,23 @@ impl Pldag {
         let mut integer_variables: Vec<String> = Vec::new();
 
         // Restrain integer bounds
-        for (p_key, p_bound) in primitives.iter().filter(|(_, bound)| bound.0 < 0 || bound.1 > 1) {
-            
+        for (p_key, p_bound) in primitives
+            .iter()
+            .filter(|(_, bound)| bound.0 < 0 || bound.1 > 1)
+        {
             // Add the variable to the integer variables list
             integer_variables.push((*p_key).clone());
-            
+
             if integer_constraints {
                 // Get the index of the current key
                 let pi = *column_names_map.get(p_key.as_str()).unwrap();
-                
+
                 A_matrix.rows.push(row_i);
                 A_matrix.cols.push(pi);
                 A_matrix.vals.push(1);
                 b_vector.push(p_bound.0);
                 row_i += 1;
-    
+
                 A_matrix.rows.push(row_i);
                 A_matrix.cols.push(pi);
                 A_matrix.vals.push(-1);
@@ -1412,10 +1489,10 @@ impl Pldag {
     }
 
     /// Converts the PL-DAG to a sparse polyhedron with default settings.
-    /// 
+    ///
     /// Convenience method that calls `to_sparse_polyhedron` with all options enabled:
     /// double_binding=true, integer_constraints=true, fixed_constraints=true.
-    /// 
+    ///
     /// # Returns
     /// A `SparsePolyhedron` with full constraint encoding
     pub fn to_sparse_polyhedron_default(&self) -> Result<SparsePolyhedron, String> {
@@ -1423,34 +1500,40 @@ impl Pldag {
     }
 
     /// Converts the PL-DAG to a dense polyhedron.
-    /// 
+    ///
     /// # Arguments
     /// * `double_binding` - If true, creates bidirectional implications
     /// * `integer_constraints` - If true, adds integer bounds constraints
     /// * `fixed_constraints` - If true, adds fixed variable constraints
-    /// 
+    ///
     /// # Returns
     /// A `DensePolyhedron` representing the DAG constraints
-    pub fn to_dense_polyhedron(&self, double_binding: bool, integer_constraints: bool, fixed_constraints: bool) -> Result<DensePolyhedron, String> {
+    pub fn to_dense_polyhedron(
+        &self,
+        double_binding: bool,
+        integer_constraints: bool,
+        fixed_constraints: bool,
+    ) -> Result<DensePolyhedron, String> {
         // Convert to sparse polyhedron first
-        let sparse_polyhedron = self.to_sparse_polyhedron(double_binding, integer_constraints, fixed_constraints)?;
+        let sparse_polyhedron =
+            self.to_sparse_polyhedron(double_binding, integer_constraints, fixed_constraints)?;
         // Convert sparse to dense polyhedron
         Ok(sparse_polyhedron.into())
     }
 
     /// Converts the PL-DAG to a dense polyhedron with default settings.
-    /// 
+    ///
     /// # Returns
     /// A `DensePolyhedron` with all constraint options enabled
     pub fn to_dense_polyhedron_default(&self) -> Result<DensePolyhedron, String> {
         self.to_dense_polyhedron(true, true, true)
     }
-    
+
     /// Sets the coefficient for a specific node.
-    /// 
+    ///
     /// Updates the coefficient value associated with the given node ID.
     /// If the node doesn't exist, this method has no effect.
-    /// 
+    ///
     /// # Arguments
     /// * `id` - The node ID to update
     /// * `coefficient` - The new coefficient value
@@ -1462,40 +1545,46 @@ impl Pldag {
         }
         false
     }
-    
+
     /// Retrieves the coefficient for a specific node.
-    /// 
+    ///
     /// # Arguments
     /// * `id` - The node ID to query
-    /// 
+    ///
     /// # Returns
     /// The coefficient value for the node, or 0.0 if the node doesn't exist
     pub fn get_coef(&self, id: &str) -> f64 {
         // Get the coefficient for the given node
-        self.nodes.get(id).map(|node| node.coefficient).unwrap_or(0.0)
+        self.nodes
+            .get(id)
+            .map(|node| node.coefficient)
+            .unwrap_or(0.0)
     }
-    
+
     /// Creates a primitive (leaf) variable with the specified bounds.
-    /// 
+    ///
     /// Primitive variables represent the base variables in the DAG and have
     /// no dependencies on other nodes.
-    /// 
+    ///
     /// # Arguments
     /// * `id` - Unique identifier for the variable
     /// * `bound` - The allowed range (min, max) for this variable
     pub fn set_primitive(&mut self, id: &str, bound: Bound) {
         // Insert the primitive variable as a node
-        self.nodes.insert(id.to_string(), Node {
-            expression: BoolExpression::Primitive(bound),
-            coefficient: 0.0,
-        });
+        self.nodes.insert(
+            id.to_string(),
+            Node {
+                expression: BoolExpression::Primitive(bound),
+                coefficient: 0.0,
+            },
+        );
     }
 
     /// Creates multiple primitive variables with the same bounds.
-    /// 
+    ///
     /// Convenience method to create several primitive variables at once.
     /// Duplicate IDs are automatically filtered out.
-    /// 
+    ///
     /// # Arguments
     /// * `ids` - Vector of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
@@ -1507,32 +1596,37 @@ impl Pldag {
     }
 
     /// Creates a general linear inequality constraint.
-    /// 
+    ///
     /// Creates a constraint of the form: sum(coeff_i * var_i) + bias >= 0.
     /// The constraint is automatically assigned a unique ID based on its content.
-    /// 
+    ///
     /// # Arguments
     /// * `coefficient_variables` - Vector of (variable_id, coefficient) pairs
     /// * `bias` - Constant bias term
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
     pub fn set_gelineq(&mut self, coefficient_variables: Vec<(&str, i64)>, bias: i64) -> ID {
-
         // Ensure coefficients have unique keys by summing duplicate values
         let mut unique_coefficients: IndexMap<ID, i64> = IndexMap::new();
         for (key, value) in coefficient_variables {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
-        let coefficient_variables: Vec<Coefficient> = unique_coefficients.into_iter().sorted_by(|a, b| a.0.cmp(&b.0)).collect();
+        let coefficient_variables: Vec<Coefficient> = unique_coefficients
+            .into_iter()
+            .sorted_by(|a, b| a.0.cmp(&b.0))
+            .collect();
 
         // Create a hash from the input data
         let hash = create_hash(&coefficient_variables, bias);
-        
+
         // Return the hash as a string
         let id = hash;
 
-        let constraint = Constraint { coefficients: coefficient_variables, bias: (bias, bias) };
+        let constraint = Constraint {
+            coefficients: coefficient_variables,
+            bias: (bias, bias),
+        };
 
         // If the composite is either a contradiction or tautology, we create a primitive instead
         // and fix it to 0 or 1 respectively.
@@ -1540,35 +1634,44 @@ impl Pldag {
         let ib_phi = constraint.dot(&coef_bounds);
         if (ib_phi.0 + bias) >= 0 {
             // Tautology: always true
-            self.nodes.insert(id.to_string(), Node {
-                expression: BoolExpression::Primitive((1, 1)),
-                coefficient: 0.0,
-            });
+            self.nodes.insert(
+                id.to_string(),
+                Node {
+                    expression: BoolExpression::Primitive((1, 1)),
+                    coefficient: 0.0,
+                },
+            );
             return id.to_string();
         } else if (ib_phi.1 + bias) < 0 {
             // Contradiction: always false
-            self.nodes.insert(id.to_string(), Node {
-                expression: BoolExpression::Primitive((0, 0)),
-                coefficient: 0.0,
-            });
+            self.nodes.insert(
+                id.to_string(),
+                Node {
+                    expression: BoolExpression::Primitive((0, 0)),
+                    coefficient: 0.0,
+                },
+            );
             return id.to_string();
         } else {
             // Insert the constraint as a node
-            self.nodes.insert(id.to_string(), Node {
-                expression: BoolExpression::Composite(constraint),
-                coefficient: 0.0,
-            });
+            self.nodes.insert(
+                id.to_string(),
+                Node {
+                    expression: BoolExpression::Composite(constraint),
+                    coefficient: 0.0,
+                },
+            );
         }
 
         id.to_string()
     }
 
     /// Creates an "at least" constraint: sum(variables) >= value.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to sum
     /// * `value` - Minimum required sum
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
     pub fn set_atleast(&mut self, references: Vec<&str>, value: i64) -> ID {
@@ -1576,11 +1679,11 @@ impl Pldag {
     }
 
     /// Creates an "at most" constraint: sum(variables) <= value.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to sum
     /// * `value` - Maximum allowed sum
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
     pub fn set_atmost(&mut self, references: Vec<&str>, value: i64) -> ID {
@@ -1588,13 +1691,13 @@ impl Pldag {
     }
 
     /// Creates an equality constraint: sum(variables) == value.
-    /// 
+    ///
     /// Implemented as the conjunction of "at least" and "at most" constraints.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to sum
     /// * `value` - Required exact sum
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
     pub fn set_equal(&mut self, references: Vec<&str>, value: i64) -> ID {
@@ -1604,149 +1707,162 @@ impl Pldag {
     }
 
     /// Creates a logical AND constraint.
-    /// 
+    ///
     /// Returns true if and only if ALL referenced variables are true.
     /// Implemented as: sum(variables) >= count(variables).
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to AND together
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_and<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_and<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), length as i64)
+        self.set_atleast(
+            unique_references.iter().map(|x| x.as_str()).collect(),
+            length as i64,
+        )
     }
 
     /// Creates a logical OR constraint.
-    /// 
+    ///
     /// Returns true if AT LEAST ONE of the referenced variables is true.
     /// Implemented as: sum(variables) >= 1.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to OR together
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_or<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_or<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), 1)
     }
 
     /// Creates a logical NAND constraint.
-    /// 
+    ///
     /// Returns true if NOT ALL of the referenced variables are true.
     /// Implemented as: sum(variables) <= count(variables) - 1.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to NAND together
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_nand<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_nand<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), length as i64 - 1)
+        self.set_atmost(
+            unique_references.iter().map(|x| x.as_str()).collect(),
+            length as i64 - 1,
+        )
     }
-    
+
     /// Creates a logical NOR constraint.
-    /// 
+    ///
     /// Returns true if NONE of the referenced variables are true.
     /// Implemented as: sum(variables) <= 0.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to NOR together
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_nor<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_nor<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0)
     }
 
     /// Creates a logical NOT constraint.
-    /// 
+    ///
     /// Returns true if NONE of the referenced variables are true.
     /// Functionally equivalent to NOR. Implemented as: sum(variables) <= 0.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to negate
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_not<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_not<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0)
     }
 
     /// Creates a logical XOR constraint.
-    /// 
+    ///
     /// Returns true if EXACTLY ONE of the referenced variables is true.
     /// Implemented as the conjunction of OR and "at most 1" constraints.
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to XOR together
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_xor<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_xor<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()).collect());
         let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 1);
         self.set_and(vec![atleast, atmost])
     }
 
     /// Creates a logical XNOR constraint.
-    /// 
+    ///
     /// Returns true if an EVEN NUMBER of the referenced variables are true
     /// (including zero). Implemented as: (sum >= 2) OR (sum <= 0).
-    /// 
+    ///
     /// # Arguments
     /// * `references` - Vector of variable IDs to XNOR together
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_xnor<T>(&mut self, references: Vec<T>) -> ID 
+    pub fn set_xnor<T>(&mut self, references: Vec<T>) -> ID
     where
         T: Into<String>,
     {
-        let unique_references: IndexSet<String> = references.into_iter().map(|x| x.into()).collect();
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.into()).collect();
         let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), 2);
         let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0);
         self.set_or(vec![atleast, atmost])
     }
 
     /// Creates a logical IMPLICATION constraint: condition -> consequence.
-    /// 
+    ///
     /// Returns true if the condition is false OR the consequence is true.
     /// Implemented as: NOT(condition) OR consequence.
-    /// 
+    ///
     /// # Arguments
     /// * `condition` - The condition variable ID
     /// * `consequence` - The consequence variable ID
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_imply<T, U>(&mut self, condition: T, consequence: U) -> ID 
+    pub fn set_imply<T, U>(&mut self, condition: T, consequence: U) -> ID
     where
         T: Into<String>,
         U: Into<String>,
@@ -1756,17 +1872,17 @@ impl Pldag {
     }
 
     /// Creates a logical EQUIVALENCE constraint: lhs <-> rhs.
-    /// 
+    ///
     /// Returns true if both variables have the same truth value.
     /// Implemented as: (lhs -> rhs) AND (rhs -> lhs).
-    /// 
+    ///
     /// # Arguments
     /// * `lhs` - The left-hand side variable ID
     /// * `rhs` - The right-hand side variable ID
-    /// 
+    ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_equiv<T, U>(&mut self, lhs: T, rhs: U) -> ID 
+    pub fn set_equiv<T, U>(&mut self, lhs: T, rhs: U) -> ID
     where
         T: Into<String> + Clone,
         U: Into<String> + Clone,
@@ -1774,7 +1890,7 @@ impl Pldag {
         // Convert to strings first to avoid type mismatches
         let lhs_str: String = lhs.into();
         let rhs_str: String = rhs.into();
-        
+
         let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()]);
         let imply_rl = self.set_not(vec![rhs_str, lhs_str]);
         self.set_or(vec![imply_lr, imply_rl])
@@ -1801,16 +1917,13 @@ mod tests {
     ///   3) run `assume(root=1)` on the polyhedron  
     ///   4) evaluate the shrunken polyhedron on the same assignments  
     ///   5) assert they agree at `root`.
-    fn evaluate_model_polyhedron(
-        model: &Pldag,
-        poly: &DensePolyhedron,
-        root: &String
-    ) {
+    fn evaluate_model_polyhedron(model: &Pldag, poly: &DensePolyhedron, root: &String) {
         for combo in model.primitive_combinations() {
             // build an IndexMap<&str,Bound> as propagate expects
-            let interp = combo.iter()
-                .map(|(k,&v)| (k.as_str(), (v,v)))
-                .collect::<IndexMap<&str,Bound>>();
+            let interp = combo
+                .iter()
+                .map(|(k, &v)| (k.as_str(), (v, v)))
+                .collect::<IndexMap<&str, Bound>>();
 
             // what the DAG says the root can be
             let prop = model.propagate(&interp);
@@ -1824,12 +1937,9 @@ mod tests {
             // and evaluate that shrunk system on the same propagated bounds
             let poly_val = shrunk.evaluate(&prop);
             assert_eq!(
-                poly_val,
-                model_root_val,
+                poly_val, model_root_val,
                 "Disagreement on {:?}: model={:?}, poly={:?}",
-                combo,
-                model_root_val,
-                poly_val
+                combo, model_root_val, poly_val
             );
         }
     }
@@ -1869,14 +1979,14 @@ mod tests {
         assignments.insert("z", (1, 1));
         let result = model.propagate(&assignments);
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
-        
+
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
         let result = model.propagate(&assignments);
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
-        
+
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 0));
         assignments.insert("y", (1, 1));
@@ -1947,8 +2057,8 @@ mod tests {
     #[test]
     fn test_to_polyhedron_and() {
         let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0,1));
-        m.set_primitive("y", (0,1));
+        m.set_primitive("x".into(), (0, 1));
+        m.set_primitive("y", (0, 1));
         let root = m.set_and(vec!["x", "y"]);
         let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
@@ -1957,9 +2067,9 @@ mod tests {
     #[test]
     fn test_to_polyhedron_or() {
         let mut m = Pldag::new();
-        m.set_primitive("a".into(), (0,1));
-        m.set_primitive("b".into(), (0,1));
-        m.set_primitive("c".into(), (0,1));
+        m.set_primitive("a".into(), (0, 1));
+        m.set_primitive("b".into(), (0, 1));
+        m.set_primitive("c".into(), (0, 1));
         let root = m.set_or(vec!["a", "b", "c"]);
         let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
@@ -1968,7 +2078,7 @@ mod tests {
     #[test]
     fn test_to_polyhedron_not() {
         let mut m = Pldag::new();
-        m.set_primitive("p".into(), (0,1));
+        m.set_primitive("p".into(), (0, 1));
         let root = m.set_not(vec!["p"]);
         let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
@@ -1977,9 +2087,9 @@ mod tests {
     #[test]
     fn test_to_polyhedron_xor() {
         let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0,1));
-        m.set_primitive("y", (0,1));
-        m.set_primitive("z".into(), (0,1));
+        m.set_primitive("x".into(), (0, 1));
+        m.set_primitive("y", (0, 1));
+        m.set_primitive("z".into(), (0, 1));
         let root = m.set_xor(vec!["x", "y", "z"]);
         let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
@@ -1990,9 +2100,9 @@ mod tests {
         // Build a small two‐level circuit:
         //   w = AND(x,y),  v = OR(w, NOT(z))
         let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0,1));
-        m.set_primitive("y", (0,1));
-        m.set_primitive("z".into(), (0,1));
+        m.set_primitive("x".into(), (0, 1));
+        m.set_primitive("y", (0, 1));
+        m.set_primitive("z".into(), (0, 1));
 
         let w = m.set_and(vec!["x", "y"]);
         let nz = m.set_not(vec!["z"]);
@@ -2002,7 +2112,7 @@ mod tests {
         evaluate_model_polyhedron(&m, &poly, &v);
     }
 
-    /// Nested/composed AND then XOR: 
+    /// Nested/composed AND then XOR:
     ///   w = AND(x,y);  v = XOR(w,z)
     #[test]
     fn test_propagate_nested_composite() {
@@ -2016,38 +2126,38 @@ mod tests {
 
         // no assignment: everything [0,1]
         let res = model.propagate(&IndexMap::new());
-        for var in &["x","y","z"] {
-            assert_eq!(res[*var], (0,1), "{}", var);
+        for var in &["x", "y", "z"] {
+            assert_eq!(res[*var], (0, 1), "{}", var);
         }
-        assert_eq!(res[&w], (0,1));
-        assert_eq!(res[&v], (0,1));
+        assert_eq!(res[&w], (0, 1));
+        assert_eq!(res[&v], (0, 1));
 
         // x=1,y=1,z=0 ⇒ w=1,v=1
         let mut interp = IndexMap::new();
-        interp.insert("x", (1,1));
-        interp.insert("y", (1,1));
-        interp.insert("z", (0,0));
+        interp.insert("x", (1, 1));
+        interp.insert("y", (1, 1));
+        interp.insert("z", (0, 0));
         let res = model.propagate(&interp);
-        assert_eq!(res[&w], (1,1));
-        assert_eq!(res[&v], (1,1));
+        assert_eq!(res[&w], (1, 1));
+        assert_eq!(res[&v], (1, 1));
 
         // x=0,y=1,z=1 ⇒ w=0,v=1
         let mut interp = IndexMap::new();
-        interp.insert("x", (0,0));
-        interp.insert("y", (1,1));
-        interp.insert("z", (1,1));
+        interp.insert("x", (0, 0));
+        interp.insert("y", (1, 1));
+        interp.insert("z", (1, 1));
         let res = model.propagate(&interp);
-        assert_eq!(res[&w], (0,0));
-        assert_eq!(res[&v], (1,1));
+        assert_eq!(res[&w], (0, 0));
+        assert_eq!(res[&v], (1, 1));
 
         // x=0,y=0,z=0 ⇒ w=0,v=0
         let mut interp = IndexMap::new();
-        interp.insert("x", (0,0));
-        interp.insert("y", (0,0));
-        interp.insert("z", (0,0));
+        interp.insert("x", (0, 0));
+        interp.insert("y", (0, 0));
+        interp.insert("z", (0, 0));
         let res = model.propagate(&interp);
-        assert_eq!(res[&w], (0,0));
-        assert_eq!(res[&v], (0,0));
+        assert_eq!(res[&w], (0, 0));
+        assert_eq!(res[&v], (0, 0));
     }
 
     /// If you ever get an inconsistent assignment (out‐of‐bounds for a primitive),
@@ -2061,11 +2171,11 @@ mod tests {
 
         let mut interp = IndexMap::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
-        interp.insert("u".into(), (5,5));
+        interp.insert("u".into(), (5, 5));
         let res = model.propagate(&interp);
 
         // we expect propagate to return exactly (5,5) for "u" and compute root = negate(5)
-        assert_eq!(res["u"], (5,5));
+        assert_eq!(res["u"], (5, 5));
         // Depending on your semantic for negate, it might be
         //   bound_multiply(-1,(5,5)) + bias
         // so just check it didn’t panic:
@@ -2074,7 +2184,6 @@ mod tests {
 
     #[test]
     fn test_to_polyhedron() {
-
         fn evaluate_model_polyhedron(model: &Pldag, polyhedron: &DensePolyhedron, root: &String) {
             for combination in model.primitive_combinations() {
                 let assignments = combination
@@ -2121,7 +2230,7 @@ mod tests {
         // AND(x) == x
         {
             let mut m = Pldag::new();
-            m.set_primitive("x".into(), (0,1));
+            m.set_primitive("x".into(), (0, 1));
             let root = m.set_and::<&str>(vec!["x"]);
             let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
@@ -2129,7 +2238,7 @@ mod tests {
         // OR(y) == y
         {
             let mut m = Pldag::new();
-            m.set_primitive("y", (0,1));
+            m.set_primitive("y", (0, 1));
             let root = m.set_or(vec!["y"]);
             let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
@@ -2137,7 +2246,7 @@ mod tests {
         // XOR(z) == z
         {
             let mut m = Pldag::new();
-            m.set_primitive("z".into(), (0,1));
+            m.set_primitive("z".into(), (0, 1));
             let root = m.set_xor(vec!["z"]);
             let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
@@ -2148,7 +2257,7 @@ mod tests {
     #[test]
     fn test_to_polyhedron_duplicate_operands_and() {
         let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0,1));
+        m.set_primitive("x".into(), (0, 1));
         let root = m.set_and(vec!["x", "x"]);
         let poly: DensePolyhedron = m.to_sparse_polyhedron_default().unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
@@ -2163,8 +2272,8 @@ mod tests {
     fn test_to_polyhedron_deeply_nested_chain() {
         let mut m = Pldag::new();
         // primitives a,b,c,d,e  (e unused but shows extra var)
-        for &v in &["a","b","c","d","e"] {
-            m.set_primitive(v.into(), (0,1));
+        for &v in &["a", "b", "c", "d", "e"] {
+            m.set_primitive(v.into(), (0, 1));
         }
         let a = "a";
         let b = "b";
@@ -2189,9 +2298,7 @@ mod tests {
         let c = pldag.set_or(vec!["d", "e"]);
         let a = pldag.set_or(vec!["b".into(), c.to_string()]);
         let deps = pldag.transitive_dependencies();
-        let expect = |xs: &[&str]| {
-            xs.iter().cloned().map(String::from).collect::<HashSet<_>>()
-        };
+        let expect = |xs: &[&str]| xs.iter().cloned().map(String::from).collect::<HashSet<_>>();
         assert_eq!(deps.get(&a), Some(&expect(&["b", &c, "d", "e"])));
         assert_eq!(deps.get(&c), Some(&expect(&["d", "e"])));
         assert_eq!(deps.get("b"), Some(&expect(&[])));
@@ -2208,9 +2315,7 @@ mod tests {
         let x = pldag.set_or(vec![y.clone()]);
         let deps = pldag.transitive_dependencies();
 
-        let expect = |xs: &[&str]| {
-            xs.iter().cloned().map(String::from).collect::<HashSet<_>>()
-        };
+        let expect = |xs: &[&str]| xs.iter().cloned().map(String::from).collect::<HashSet<_>>();
 
         assert_eq!(deps.get(&x), Some(&expect(&[&y, "z"])));
         assert_eq!(deps.get(&y), Some(&expect(&["z"])));
@@ -2222,15 +2327,22 @@ mod tests {
         // no Composite at all
         let mut pldag = Pldag::new();
         for &name in &["p", "q", "r"] {
-            pldag.nodes.insert(name.into(), Node {
-                expression: BoolExpression::Primitive((1, 5)),
-                coefficient: 0.0,
-            });
+            pldag.nodes.insert(
+                name.into(),
+                Node {
+                    expression: BoolExpression::Primitive((1, 5)),
+                    coefficient: 0.0,
+                },
+            );
         }
         let deps = pldag.transitive_dependencies();
 
         for &name in &["p", "q", "r"] {
-            assert!(deps.get(name).unwrap().is_empty(), "{} should have no deps", name);
+            assert!(
+                deps.get(name).unwrap().is_empty(),
+                "{} should have no deps",
+                name
+            );
         }
     }
 
@@ -2240,17 +2352,17 @@ mod tests {
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         let root = model.set_and(vec!["x", "y"]);
-        
+
         // Set coefficients for nodes
         model.set_coef("x", 2.0);
         model.set_coef("y", 3.0);
-        
+
         let mut assignments = IndexMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        
+
         let propagated = model.propagate_coefs(&assignments);
-        
+
         // Check the results: bounds should be (1,1) and coefficients should be accumulated
         assert_eq!(propagated.get("x").unwrap().0, (1, 1)); // bounds
         assert_eq!(propagated.get("x").unwrap().1, (2.0, 2.0)); // coefficients
@@ -2273,11 +2385,7 @@ mod tests {
         pldag.set_primitive("z", (0, 1));
 
         // A reference ID is returned
-        let root = pldag.set_or(vec![
-            "x",
-            "y",
-            "z",
-        ]);
+        let root = pldag.set_or(vec!["x", "y", "z"]);
 
         // 1. Validate a combination:
         let mut inputs: IndexMap<&str, Bound> = IndexMap::new();
@@ -2287,13 +2395,13 @@ mod tests {
         println!("Root valid? {}", *validited.get(&root).unwrap() == (1, 1)); // This will be False
 
         // If we however fix x to be zero, then the root is false
-        inputs.insert("x", (0,0));
+        inputs.insert("x", (0, 0));
         let revalidited = pldag.propagate(&inputs);
         println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be false
 
         // However, fixing y and z to 1 will yield the root node to be true (since the root will be true if any of x, y or z is true).
-        inputs.insert("y", (1,1));
-        inputs.insert("z", (1,1));
+        inputs.insert("y", (1, 1));
+        inputs.insert("z", (1, 1));
         let revalidited = pldag.propagate(&inputs);
         println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be true
 
@@ -2308,20 +2416,20 @@ mod tests {
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // And notice what will happen if we remove the x value (i.e. x being (0,1))
-        inputs.insert("x", (0,1));
+        inputs.insert("x", (0, 1));
         let scores = pldag.propagate_coefs(&inputs);
         // The root will return bounds with coefficient range meaning the value is between bounds with not enough information to
-        // determine the exact value. 
+        // determine the exact value.
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // .. and if we set x to be 0, then the root will be definitely determined.
-        inputs.insert("x", (0,0));
+        inputs.insert("x", (0, 0));
         let scores = pldag.propagate_coefs(&inputs);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
 
         // .. and if we set y and z to be 0, then the root will be 0.
-        inputs.insert("y", (0,0));
-        inputs.insert("z", (0,0));
+        inputs.insert("y", (0, 0));
+        inputs.insert("z", (0, 0));
         let scores = pldag.propagate_coefs(&inputs);
         println!("Total score: {:?}", scores.get(&root).unwrap().1); // .1 is the coefficient part
     }
@@ -2329,15 +2437,15 @@ mod tests {
     #[test]
     fn test_get_objective() {
         let mut model = Pldag::new();
-        
+
         // Create primitive nodes with different coefficients
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
-        
+
         // Create a composite node (should not appear in coefficients)
         let root = model.set_and(vec!["x", "y"]);
-        
+
         // Initially, all objective coefficients should be 0.0 (default)
         let coeffs = model.get_objective();
         assert_eq!(coeffs.len(), 3); // Only primitives should be included
@@ -2345,13 +2453,13 @@ mod tests {
         assert_eq!(coeffs.get("y"), Some(&0.0));
         assert_eq!(coeffs.get("z"), Some(&0.0));
         assert_eq!(coeffs.get(&root), None); // Composite nodes should not be included
-        
+
         // Set some coefficients
         model.set_coef("x", 2.5);
         model.set_coef("y", -1.0);
         model.set_coef("z", 3.14);
         model.set_coef(&root, 10.0); // This should not appear in get_objective
-        
+
         // Test that get_objective returns the updated values for primitives only
         let coeffs = model.get_objective();
         assert_eq!(coeffs.len(), 3); // Still only primitives
@@ -2359,18 +2467,18 @@ mod tests {
         assert_eq!(coeffs.get("y"), Some(&-1.0));
         assert_eq!(coeffs.get("z"), Some(&3.14));
         assert_eq!(coeffs.get(&root), None); // Composite still not included
-        
+
         // Verify the order is preserved (IndexMap should maintain insertion order)
         let keys: Vec<&String> = coeffs.keys().collect();
         assert_eq!(keys, vec!["x", "y", "z"]);
-        
+
         // Test with a model that has only composite nodes
         let mut model_no_primitives = Pldag::new();
         model_no_primitives.set_primitive("a", (0, 1));
         model_no_primitives.set_primitive("b", (0, 1));
         let composite1 = model_no_primitives.set_and(vec!["a", "b".into()]);
         let composite2 = model_no_primitives.set_or(vec![composite1.clone()]);
-        
+
         // Remove the primitives by replacing them with composites
         // (This is a bit artificial, but tests the filtering logic)
         let coeffs_mixed = model_no_primitives.get_objective();
@@ -2387,10 +2495,10 @@ mod tests {
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
-        
+
         // Create an XOR constraint
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        
+
         let mut seed_assignments = IndexMap::new();
         seed_assignments.insert("x", (1, 1)); // x is true
         seed_assignments.insert("y", (0, 0)); // y is false
@@ -2401,7 +2509,7 @@ mod tests {
                 assert_eq!(p.fixed["x"], (1, 1)); // x should be true
                 assert_eq!(p.fixed["y"], (0, 0)); // y should be false
                 assert_eq!(p.fixed["z"], (0, 0)); // z
-            },
+            }
             Err(e) => panic!("Presolve failed: {}", e),
         }
 
@@ -2416,7 +2524,7 @@ mod tests {
                 assert_eq!(p.fixed["x"], (1, 1)); // x should be true
                 assert!(!p.fixed.contains_key("y")); // y is undecided
                 assert_eq!(p.fixed["z"], (0, 0)); // z
-            },
+            }
             Err(e) => panic!("Presolve failed: {}", e),
         }
 
@@ -2424,23 +2532,21 @@ mod tests {
         // model.set_primitive("x", (0, 1));
         // model.set_primitive("y", (0, 1));
         // model.set_primitive("z", (0, 1));
-        
+
         // // Create an XOR constraint
         // let root = model.set_and(vec!["x", "y", "z".into()]);
         // let mut seed_assignments = IndexMap::new();
         // seed_assignments.insert(root, (1, 1)); // x
         // match model.presolve(&seed_assignments) {
         //     Ok(p) => {
-        //         assert_eq!(p.fixed["x"], (0, 1)); 
-        //         assert_eq!(p.fixed["y"], (0, 1)); 
-        //         assert_eq!(p.fixed["z"], (0, 1)); 
+        //         assert_eq!(p.fixed["x"], (0, 1));
+        //         assert_eq!(p.fixed["y"], (0, 1));
+        //         assert_eq!(p.fixed["z"], (0, 1));
         //     },
         //     Err(e) => panic!("Presolve failed: {}", e),
         // }
-
     }
 
-    
     #[test]
     fn test_print_dense_matrix() {
         let mut matrix = DenseIntegerMatrix::new(3, 3);
@@ -2474,8 +2580,14 @@ mod tests {
         let mut model = Pldag::new();
         let a = model.set_and(Vec::<String>::new());
         let b = model.set_or(Vec::<String>::new());
-        assert_eq!(model.nodes.get(&a).unwrap().expression, BoolExpression::Primitive((1, 1)));
-        assert_eq!(model.nodes.get(&b).unwrap().expression, BoolExpression::Primitive((0, 0)));
+        assert_eq!(
+            model.nodes.get(&a).unwrap().expression,
+            BoolExpression::Primitive((1, 1))
+        );
+        assert_eq!(
+            model.nodes.get(&b).unwrap().expression,
+            BoolExpression::Primitive((0, 0))
+        );
     }
 
     #[test]
@@ -2486,22 +2598,22 @@ mod tests {
         let equiv = model.set_equiv("p", "q");
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
-        
+
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 1));
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
-        
+
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 0));
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
-        
+
         model.set_primitive("p", (0, 0));
         model.set_primitive("q", (0, 0));
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
-        
+
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (1, 1));
         let propagated = model.propagate(&IndexMap::new());
@@ -2516,12 +2628,12 @@ mod tests {
         let equiv = model.set_imply("p", "q");
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
-        
+
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (1, 1));
         let propagated = model.propagate(&IndexMap::new());
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
-        
+
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 0));
         let propagated = model.propagate(&IndexMap::new());
@@ -2534,7 +2646,7 @@ mod tests {
         model1.set_primitive("x", (0, 1));
         model1.set_primitive("y", (0, 1));
         model1.set_and(vec!["x", "y"]);
-        
+
         let mut model2 = Pldag::new();
         model2.set_primitive("y", (0, 1));
         model2.set_primitive("x", (0, 1));
@@ -2551,7 +2663,7 @@ mod tests {
         model1.set_primitive("y", (0, 1));
         model1.set_and(vec!["x", "y"]);
         let polyhash1 = model1.to_sparse_polyhedron_default().unwrap().get_hash();
-        
+
         let mut model2 = Pldag::new();
         model2.set_primitive("y", (0, 1));
         model2.set_primitive("x", (0, 1));
