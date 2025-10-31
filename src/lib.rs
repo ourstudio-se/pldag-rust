@@ -572,7 +572,7 @@ pub enum BoolExpression {
     /// A primitive (leaf) node with a bound on its value
     Primitive(Bound),
 }
-
+#[derive(Debug, Clone)]
 /// Represents a node in the PL-DAG containing both logical expression and coefficient.
 pub struct Node {
     /// The logical expression (either primitive or composite)
@@ -589,6 +589,7 @@ pub struct Node {
 /// - Each node has an associated coefficient for accumulation operations
 ///
 /// The DAG structure ensures no cycles and enables efficient bottom-up propagation.
+#[derive(Clone)]
 pub struct Pldag {
     /// Map from node IDs to their corresponding nodes
     pub nodes: IndexMap<ID, Node>,
