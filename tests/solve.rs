@@ -1332,9 +1332,8 @@ mod glpk_tests {
             .unwrap();
         if let Some(assignments) = &solutions[0] {
             // Convert String keys to &str keys for propagate
-            let str_assignments: IndexMap<&str, Bound> =
-                assignments.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-            let propagated = model.propagate(&str_assignments);
+            let str_assignments = assignments.iter().map(|(k, v)| (k.as_str(), *v));
+            let propagated = model.propagate(str_assignments);
 
             // Check that root is Some and is equal to 1
             assert!(

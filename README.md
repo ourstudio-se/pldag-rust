@@ -44,8 +44,8 @@ Enabling the `glpk` feature links to the GNU Linear Programming Kit (GLPK). If y
 ```rust
 fn propagate(
     &self,
-    assignment: &IndexMap<&str, Bound>, // Assignment = IndexMap<String, Bound>
-) -> Assignment;
+    assignment: impl Iterator<Item = (K, Bound)>, 
+) -> Assignment; // Assignment = IndexMap<String, Bound>
 ```
 
 *Propagates bounds bottom‑up through the DAG and returns a map of node → bound (`(min, max)`).*
