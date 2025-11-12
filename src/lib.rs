@@ -1606,7 +1606,11 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_gelineq(&mut self, coefficient_variables: Vec<(&str, i64)>, bias: i64) -> ID {
+    pub fn set_gelineq<'a>(
+        &mut self,
+        coefficient_variables: impl IntoIterator<Item = (&'a str, i64)>,
+        bias: i64,
+    ) -> ID {
         // Ensure coefficients have unique keys by summing duplicate values
         let mut unique_coefficients: IndexMap<ID, i64> = IndexMap::new();
         for (key, value) in coefficient_variables {
@@ -1674,8 +1678,19 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atleast(&mut self, references: Vec<&str>, value: i64) -> ID {
-        self.set_gelineq(references.into_iter().map(|x| (x, 1)).collect(), -value)
+    pub fn set_atleast<'a>(&mut self, references: impl IntoIterator<Item = &'a str>, value: i64) -> ID {
+        self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value)
+    }
+
+    pub fn set_atleast_ref<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str>,
+        value: &str,
+    ) -> ID {
+        self.set_gelineq(
+            references.into_iter().map(|x| (x, 1)).chain([(value, -1)]),
+            0,
+        )
     }
 
     /// Creates an "at most" constraint: sum(variables) <= value.
@@ -1686,8 +1701,19 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atmost(&mut self, references: Vec<&str>, value: i64) -> ID {
-        self.set_gelineq(references.into_iter().map(|x| (x, -1)).collect(), value)
+    pub fn set_atmost<'a>(&mut self, references: impl IntoIterator<Item = &'a str>, value: i64) -> ID {
+        self.set_gelineq(references.into_iter().map(|x| (x, -1)), value)
+    }
+
+    pub fn set_atmost_ref<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str>,
+        value: &str,
+    ) -> ID {
+        self.set_gelineq(
+            references.into_iter().map(|x| (x, -1)).chain([(value, 1)]),
+            0,
+        )
     }
 
     /// Creates an equality constraint: sum(variables) == value.
@@ -1700,9 +1726,15 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_equal(&mut self, references: Vec<&str>, value: i64) -> ID {
-        let ub = self.set_atleast(references.clone().into_iter().collect(), value);
-        let lb = self.set_atmost(references.into_iter().collect(), value);
+    pub fn set_equal<'a >(&mut self, references: impl IntoIterator<Item = &'a str> + Clone, value: i64) -> ID {
+        let ub = self.set_atleast(references.clone(), value);
+        let lb = self.set_atmost(references, value);
+        self.set_and(vec![ub, lb])
+    }
+
+    pub fn set_equal_ref<'a >(&mut self, references: impl IntoIterator<Item = &'a str> + Clone, value: &str) -> ID {
+        let ub = self.set_atleast_ref(references.clone(), value);
+        let lb = self.set_atmost_ref(references, value);
         self.set_and(vec![ub, lb])
     }
 
@@ -1724,7 +1756,7 @@ impl Pldag {
             references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
         self.set_atleast(
-            unique_references.iter().map(|x| x.as_str()).collect(),
+            unique_references.iter().map(|x| x.as_str()),
             length as i64,
         )
     }
@@ -1745,7 +1777,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), 1)
+        self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1)
     }
 
     /// Creates a logical NAND constraint.
@@ -1766,7 +1798,7 @@ impl Pldag {
             references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
         self.set_atmost(
-            unique_references.iter().map(|x| x.as_str()).collect(),
+            unique_references.iter().map(|x| x.as_str()),
             length as i64 - 1,
         )
     }
@@ -1787,7 +1819,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0)
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
     }
 
     /// Creates a logical NOT constraint.
@@ -1806,7 +1838,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0)
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
     }
 
     /// Creates a logical XOR constraint.
@@ -1826,7 +1858,7 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
         let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()).collect());
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 1);
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1);
         self.set_and(vec![atleast, atmost])
     }
 
@@ -1846,8 +1878,8 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), 2);
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0);
+        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2);
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0);
         self.set_or(vec![atleast, atmost])
     }
 
