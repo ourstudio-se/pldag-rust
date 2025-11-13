@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::iter::empty;
 use std::ops::{Index, RangeInclusive};
 
 /// Represents a bound with minimum and maximum values.
@@ -572,7 +573,7 @@ pub enum BoolExpression {
     /// A primitive (leaf) node with a bound on its value
     Primitive(Bound),
 }
-
+#[derive(Debug, Clone)]
 /// Represents a node in the PL-DAG containing both logical expression and coefficient.
 pub struct Node {
     /// The logical expression (either primitive or composite)
@@ -589,6 +590,7 @@ pub struct Node {
 /// - Each node has an associated coefficient for accumulation operations
 ///
 /// The DAG structure ensures no cycles and enables efficient bottom-up propagation.
+#[derive(Clone)]
 pub struct Pldag {
     /// Map from node IDs to their corresponding nodes
     pub nodes: IndexMap<ID, Node>,
@@ -931,11 +933,14 @@ impl Pldag {
     ///
     /// # Returns
     /// Complete assignment including bounds for all reachable nodes
-    pub fn propagate(&self, assignment: &IndexMap<&str, Bound>) -> Assignment {
-        // Convert &str keys to String keys for internal storage
+    pub fn propagate<K>(&self, assignment: impl IntoIterator<Item = (K, Bound)>) -> Assignment
+    where
+        K: ToString,
+    {
+        // Convert keys to String keys for internal storage
         let mut result: Assignment = assignment
-            .iter()
-            .map(|(k, v)| (k.to_string(), *v))
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
             .collect();
 
         // Fill result with the primitive variable bounds
@@ -1033,18 +1038,7 @@ impl Pldag {
     /// # Returns
     /// Complete assignment with bounds for all nodes
     pub fn propagate_default(&self) -> Assignment {
-        let assignments: IndexMap<&str, Bound> = self
-            .nodes
-            .iter()
-            .filter_map(|(key, node)| {
-                if let BoolExpression::Primitive(bound) = &node.expression {
-                    Some((key.as_str(), *bound))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        self.propagate(&assignments)
+        self.propagate(empty::<(&String, Bound)>())
     }
 
     /// Propagates bounds and accumulates coefficients for multiple assignments.
@@ -1070,7 +1064,7 @@ impl Pldag {
 
         for assignment in assignments {
             // Start with the propagated bounds
-            let result = self.propagate(assignment);
+            let result = self.propagate(assignment.into_iter().map(|(k, v)| (*k, v.clone())));
 
             let mut valued_assigment: ValuedAssignment = IndexMap::new();
             // Calculate the accumulated coefficients with the new bound result
@@ -1175,6 +1169,7 @@ impl Pldag {
 
         // Convert the PL-DAG to a polyhedron representation
         let polyhedron = self.to_sparse_polyhedron(true, true, true)?;
+        let dense_polyhedron = self.to_dense_polyhedron(true, true, true)?;
 
         // Check that all assumptions are valid
         for (key, bound) in &assume {
@@ -1606,7 +1601,11 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_gelineq(&mut self, coefficient_variables: Vec<(&str, i64)>, bias: i64) -> ID {
+    pub fn set_gelineq<'a>(
+        &mut self,
+        coefficient_variables: impl IntoIterator<Item = (&'a str, i64)>,
+        bias: i64,
+    ) -> ID {
         // Ensure coefficients have unique keys by summing duplicate values
         let mut unique_coefficients: IndexMap<ID, i64> = IndexMap::new();
         for (key, value) in coefficient_variables {
@@ -1674,8 +1673,19 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atleast(&mut self, references: Vec<&str>, value: i64) -> ID {
-        self.set_gelineq(references.into_iter().map(|x| (x, 1)).collect(), -value)
+    pub fn set_atleast<'a>(&mut self, references: impl IntoIterator<Item = &'a str>, value: i64) -> ID {
+        self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value)
+    }
+
+    pub fn set_atleast_ref<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str>,
+        value: &str,
+    ) -> ID {
+        self.set_gelineq(
+            references.into_iter().map(|x| (x, 1)).chain([(value, -1)]),
+            0,
+        )
     }
 
     /// Creates an "at most" constraint: sum(variables) <= value.
@@ -1686,8 +1696,19 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atmost(&mut self, references: Vec<&str>, value: i64) -> ID {
-        self.set_gelineq(references.into_iter().map(|x| (x, -1)).collect(), value)
+    pub fn set_atmost<'a>(&mut self, references: impl IntoIterator<Item = &'a str>, value: i64) -> ID {
+        self.set_gelineq(references.into_iter().map(|x| (x, -1)), value)
+    }
+
+    pub fn set_atmost_ref<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str>,
+        value: &str,
+    ) -> ID {
+        self.set_gelineq(
+            references.into_iter().map(|x| (x, -1)).chain([(value, 1)]),
+            0,
+        )
     }
 
     /// Creates an equality constraint: sum(variables) == value.
@@ -1700,9 +1721,15 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_equal(&mut self, references: Vec<&str>, value: i64) -> ID {
-        let ub = self.set_atleast(references.clone().into_iter().collect(), value);
-        let lb = self.set_atmost(references.into_iter().collect(), value);
+    pub fn set_equal<'a >(&mut self, references: impl IntoIterator<Item = &'a str> + Clone, value: i64) -> ID {
+        let ub = self.set_atleast(references.clone(), value);
+        let lb = self.set_atmost(references, value);
+        self.set_and(vec![ub, lb])
+    }
+
+    pub fn set_equal_ref<'a >(&mut self, references: impl IntoIterator<Item = &'a str> + Clone, value: &str) -> ID {
+        let ub = self.set_atleast_ref(references.clone(), value);
+        let lb = self.set_atmost_ref(references, value);
         self.set_and(vec![ub, lb])
     }
 
@@ -1724,7 +1751,7 @@ impl Pldag {
             references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
         self.set_atleast(
-            unique_references.iter().map(|x| x.as_str()).collect(),
+            unique_references.iter().map(|x| x.as_str()),
             length as i64,
         )
     }
@@ -1745,7 +1772,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), 1)
+        self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1)
     }
 
     /// Creates a logical NAND constraint.
@@ -1766,7 +1793,7 @@ impl Pldag {
             references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
         self.set_atmost(
-            unique_references.iter().map(|x| x.as_str()).collect(),
+            unique_references.iter().map(|x| x.as_str()),
             length as i64 - 1,
         )
     }
@@ -1787,7 +1814,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0)
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
     }
 
     /// Creates a logical NOT constraint.
@@ -1806,7 +1833,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0)
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
     }
 
     /// Creates a logical XOR constraint.
@@ -1826,7 +1853,7 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
         let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()).collect());
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 1);
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1);
         self.set_and(vec![atleast, atmost])
     }
 
@@ -1846,8 +1873,8 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
-        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()).collect(), 2);
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()).collect(), 0);
+        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2);
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0);
         self.set_or(vec![atleast, atmost])
     }
 
@@ -1926,7 +1953,7 @@ mod tests {
                 .collect::<IndexMap<&str, Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.propagate(&interp);
+            let prop = model.propagate(interp);
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -1951,7 +1978,7 @@ mod tests {
         model.set_primitive("y", (0, 1));
         let root = model.set_and(vec!["x", "y"]);
 
-        let result = model.propagate(&IndexMap::new());
+        let result = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get(&root).unwrap(), &(0, 1));
@@ -1959,7 +1986,7 @@ mod tests {
         let mut assignments = IndexMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        let result = model.propagate(&assignments);
+        let result = model.propagate(assignments);
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         let mut model = Pldag::new();
@@ -1967,7 +1994,7 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let result = model.propagate(&IndexMap::new());
+        let result = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get("z").unwrap(), &(0, 1));
@@ -1977,21 +2004,21 @@ mod tests {
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(&assignments);
+        let result = model.propagate(assignments);
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(&assignments);
+        let result = model.propagate(assignments);
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 0));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (0, 0));
-        let result = model.propagate(&assignments);
+        let result = model.propagate(assignments);
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
     }
 
@@ -2004,28 +2031,28 @@ mod tests {
         let or_root = model.set_or(vec!["a", "b"]);
 
         // No assignment: both inputs full [0,1], output [0,1]
-        let res = model.propagate(&IndexMap::new());
+        let res = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(res["a"], (0, 1));
         assert_eq!(res["b"], (0, 1));
         assert_eq!(res[&or_root], (0, 1));
 
         // a=1 ⇒ output must be 1
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (1, 1));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (0, 0));
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&or_root], (0, 1));
     }
 
@@ -2037,20 +2064,20 @@ mod tests {
         let not_root = model.set_not(vec!["p"]);
 
         // no assignment ⇒ [0,1]
-        let res = model.propagate(&IndexMap::new());
+        let res = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(res["p"], (0, 1));
         assert_eq!(res[&not_root], (0, 1));
 
         // p = 0 ⇒ root = 1
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<String, Bound>::new();
         interp.insert("p".into(), (0, 0));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (1, 1));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&not_root], (0, 0));
     }
 
@@ -2125,7 +2152,7 @@ mod tests {
         let v = model.set_xor(vec![w.clone(), "z".into()]);
 
         // no assignment: everything [0,1]
-        let res = model.propagate(&IndexMap::new());
+        let res = model.propagate(empty::<(&String, Bound)>());
         for var in &["x", "y", "z"] {
             assert_eq!(res[*var], (0, 1), "{}", var);
         }
@@ -2133,29 +2160,29 @@ mod tests {
         assert_eq!(res[&v], (0, 1));
 
         // x=1,y=1,z=0 ⇒ w=1,v=1
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("x", (1, 1));
         interp.insert("y", (1, 1));
         interp.insert("z", (0, 0));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&w], (1, 1));
         assert_eq!(res[&v], (1, 1));
 
         // x=0,y=1,z=1 ⇒ w=0,v=1
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("x", (0, 0));
         interp.insert("y", (1, 1));
         interp.insert("z", (1, 1));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (1, 1));
 
         // x=0,y=0,z=0 ⇒ w=0,v=0
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("x", (0, 0));
         interp.insert("y", (0, 0));
         interp.insert("z", (0, 0));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (0, 0));
     }
@@ -2169,10 +2196,10 @@ mod tests {
         model.set_primitive("u".into(), (0, 1));
         let root = model.set_not(vec!["u"]);
 
-        let mut interp = IndexMap::new();
+        let mut interp = IndexMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u".into(), (5, 5));
-        let res = model.propagate(&interp);
+        let res = model.propagate(interp);
 
         // we expect propagate to return exactly (5,5) for "u" and compute root = negate(5)
         assert_eq!(res["u"], (5, 5));
@@ -2190,7 +2217,7 @@ mod tests {
                     .iter()
                     .map(|(k, &v)| (k.as_str(), (v, v)))
                     .collect::<IndexMap<&str, Bound>>();
-                let model_prop = model.propagate(&assignments);
+                let model_prop = model.propagate(assignments);
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -2389,20 +2416,20 @@ mod tests {
 
         // 1. Validate a combination:
         let mut inputs: IndexMap<&str, Bound> = IndexMap::new();
-        let validited = pldag.propagate(&inputs);
+        let validited = pldag.propagate(inputs.clone());
         // Since nothing is given, and all other variable inplicitly is (0, 1) from the pldag model,
         // the root will be (0,1) since there's not enough information to evalute the root `or` node.
         println!("Root valid? {}", *validited.get(&root).unwrap() == (1, 1)); // This will be False
 
         // If we however fix x to be zero, then the root is false
         inputs.insert("x", (0, 0));
-        let revalidited = pldag.propagate(&inputs);
+        let revalidited = pldag.propagate(inputs.clone());
         println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be false
 
         // However, fixing y and z to 1 will yield the root node to be true (since the root will be true if any of x, y or z is true).
         inputs.insert("y", (1, 1));
         inputs.insert("z", (1, 1));
-        let revalidited = pldag.propagate(&inputs);
+        let revalidited = pldag.propagate(inputs.clone());
         println!("Root valid? {}", *revalidited.get(&root).unwrap() == (1, 1)); // This will be true
 
         // 2. Score a configuration:
@@ -2596,27 +2623,27 @@ mod tests {
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
         let equiv = model.set_equiv("p", "q");
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 1));
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 0));
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
 
         model.set_primitive("p", (0, 0));
         model.set_primitive("q", (0, 0));
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (1, 1));
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
     }
 
@@ -2626,17 +2653,17 @@ mod tests {
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
         let equiv = model.set_imply("p", "q");
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (1, 1));
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 0));
-        let propagated = model.propagate(&IndexMap::new());
+        let propagated = model.propagate(empty::<(&String, Bound)>());
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
     }
 
