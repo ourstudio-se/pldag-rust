@@ -1147,6 +1147,7 @@ impl Pldag {
     }
 
     #[cfg(feature = "glpk")]
+    #[cfg_attr(feature = "trace", tracing::instrument(skip_all))]
     /// Solve the supplied objectives in-process with GLPK.
     /// Only available when the crate is compiled with `--features glpk`
     ///
@@ -1169,7 +1170,6 @@ impl Pldag {
 
         // Convert the PL-DAG to a polyhedron representation
         let polyhedron = self.to_sparse_polyhedron(true, true, true)?;
-        let dense_polyhedron = self.to_dense_polyhedron(true, true, true)?;
 
         // Check that all assumptions are valid
         for (key, bound) in &assume {
@@ -1236,7 +1236,14 @@ impl Pldag {
             glpk_matrix.b.push((0, 0));
         }
 
-        let solutions: Vec<Solution> = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
+        let mut solutions: Vec<Solution> = Vec::default();
+        #[cfg(feature = "trace")] {
+            let span = tracing::span!(tracing::Level::INFO, "solve_ilps");
+            solutions = span.in_scope(|| solve_ilps(&mut glpk_matrix, objectives, maximize, false));
+        }
+        #[cfg(not(feature = "trace"))] {
+            solutions = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
+        }
 
         return Ok(solutions
             .iter()
