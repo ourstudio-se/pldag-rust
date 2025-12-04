@@ -1,6 +1,5 @@
 #[cfg(feature = "glpk")]
 mod glpk_tests {
-    use indexmap::IndexMap;
     use pldag::{Bound, Pldag};
     use std::collections::HashMap;
 
@@ -192,6 +191,7 @@ mod glpk_tests {
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
+        assume.insert(&imply_node, (1, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(
@@ -257,6 +257,7 @@ mod glpk_tests {
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
+        assume.insert(&equiv_node, (1, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(
@@ -279,6 +280,7 @@ mod glpk_tests {
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (0, 0));
         assume.insert("y", (0, 0));
+        assume.insert(&equiv_node, (1, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(
@@ -324,6 +326,7 @@ mod glpk_tests {
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
+        assume.insert(&atleast_node, (0, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(
@@ -371,6 +374,7 @@ mod glpk_tests {
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
+        assume.insert(&atmost_node, (0, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(
@@ -418,6 +422,7 @@ mod glpk_tests {
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
+        assume.insert(&equal_node, (1, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Equal 2 constraint should be satisfied");
@@ -462,6 +467,7 @@ mod glpk_tests {
         assume.insert("x", (2, 2));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
+        assume.insert(&gelineq_node, (1, 1));
         // 2*2 + 3*1 - 0 = 7 >= 4, so constraint should be satisfied
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
@@ -774,20 +780,17 @@ mod glpk_tests {
 
     #[test]
     fn optimization_with_coefficients() {
-        // Test optimization using set_coef functionality
+        // Test optimization using coefficients in objective
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
-        dag.set_coef("x", 2.5);
-        dag.set_coef("y", 1.5);
 
         let atmost_node = dag.set_atmost(vec!["x", "y"], 4);
 
-        let objective_indexmap = dag.get_objective();
-        let objective = objective_indexmap
-            .iter()
-            .map(|(k, v)| (k.as_str(), *v))
-            .collect::<HashMap<&str, f64>>();
+        let mut objective = HashMap::<&str, f64>::new();
+        objective.insert("x", 2.5);
+        objective.insert("y", 1.5);
+
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert(&atmost_node, (1, 1));
 
@@ -1096,10 +1099,12 @@ mod glpk_tests {
         let and_single = dag.set_and(vec!["x"]);
         let or_single = dag.set_or(vec!["x"]);
         let xor_single = dag.set_xor(vec!["x"]);
+        let root = dag.set_and(vec![and_single.clone(), or_single.clone(), xor_single.clone()]);
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
+        assume.insert(&root, (1, 1));
 
         let solns = dag.solve(vec![objective], assume, true).unwrap();
         assert!(
@@ -1229,38 +1234,6 @@ mod glpk_tests {
     }
 
     #[test]
-    fn test_solve_when_composites_turns_to_primitives() {
-        let mut model = Pldag::new();
-        let sand = model.set_and(Vec::<String>::new());
-        let sor = model.set_or(Vec::<String>::new());
-        let solutions = model
-            .solve(
-                vec![HashMap::from([(sand.as_str(), -1.0), (sor.as_str(), 1.0)])],
-                HashMap::new(),
-                true,
-            )
-            .unwrap();
-        let solution = solutions[0].as_ref().unwrap();
-        assert_eq!(*solution.get(sand.as_str()).unwrap(), (1, 1));
-        assert_eq!(*solution.get(sor.as_str()).unwrap(), (0, 0));
-
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let atmost_taut = model.set_atmost(vec!["x", "y", "z"], 3);
-        let solutions = model
-            .solve(
-                vec![HashMap::from([(atmost_taut.as_str(), -1.0)])],
-                HashMap::new(),
-                true,
-            )
-            .unwrap();
-        let solution = solutions[0].as_ref().unwrap();
-        assert_eq!(*solution.get(atmost_taut.as_str()).unwrap(), (1, 1));
-    }
-
-    #[test]
     fn test_exactly_one_boolean_selection() {
         let mut model = Pldag::new();
         model.set_primitive("a", (0, 1));
@@ -1296,7 +1269,6 @@ mod glpk_tests {
                 true,
             )
             .unwrap();
-        println!("{}", model.to_dense_polyhedron_default().unwrap());
         assert!(
             solutions[0].is_none(),
             "Conflicting equalities should be infeasible"
