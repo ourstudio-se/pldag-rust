@@ -1,5 +1,5 @@
-mod storage;
 mod pldag;
+mod storage;
 
-pub use storage::{KeyValueStore, InMemoryStore};
-pub use pldag::{Pldag, Bound};
+pub use pldag::{Bound, Pldag};
+pub use storage::{InMemoryStore, KeyValueStore};

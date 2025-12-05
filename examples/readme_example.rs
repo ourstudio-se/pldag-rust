@@ -43,5 +43,4 @@ fn main() {
     // 1. Validate a combination
     let validated = pldag.propagate_default();
     println!("root bound = {:?}", validated[&root]);
-
 }

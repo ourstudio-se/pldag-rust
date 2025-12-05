@@ -1,16 +1,15 @@
+use crate::storage::{InMemoryStore, NodeStore, NodeStoreTrait};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::iter::empty;
-use crate::storage::KeyValueStore;
-use serde::{Serialize, Deserialize};
 
 /// Represents a bound with minimum and maximum values.
 /// Used to specify the allowed range for variables and constraints.
-pub type Bound = (i64, i64);
+pub type Bound = (i32, i32);
 
 /// Type alias for node identifiers in the DAG.
 pub type ID = String;
@@ -26,7 +25,7 @@ pub type ID = String;
 ///
 /// # Returns
 /// A 64-bit hash value representing the input data
-fn create_hash(data: &Vec<(String, i64)>, num: i64) -> u64 {
+fn create_hash(data: &Vec<(String, i32)>, num: i32) -> u64 {
     // Create a new hasher
     let mut hasher = DefaultHasher::new();
 
@@ -36,33 +35,11 @@ fn create_hash(data: &Vec<(String, i64)>, num: i64) -> u64 {
         i.hash(&mut hasher);
     }
 
-    // Hash the standalone i64 value
+    // Hash the standalone i32 value
     num.hash(&mut hasher);
 
     // Return the final hash value
     hasher.finish()
-}
-
-/// Checks if a bound represents a fixed value (min equals max).
-///
-/// # Arguments
-/// * `b` - A bound tuple (min, max)
-///
-/// # Returns
-/// `true` if the bound represents a single fixed value, `false` otherwise
-fn bound_fixed(b: Bound) -> bool {
-    b.0 == b.1
-}
-
-/// Checks if a bound represents a boolean range [0, 1].
-///
-/// # Arguments
-/// * `b` - A bound tuple (min, max)
-///
-/// # Returns
-/// `true` if the bound represents a boolean value (0 to 1), `false` otherwise
-fn bound_bool(b: Bound) -> bool {
-    b.0 == 0 && b.1 == 1
 }
 
 /// Adds two bounds together element-wise.
@@ -88,23 +65,12 @@ fn bound_add(b1: Bound, b2: Bound) -> Bound {
 ///
 /// # Returns
 /// A new bound with the multiplication applied
-fn bound_multiply(k: i64, b: Bound) -> Bound {
+fn bound_multiply(k: i32, b: Bound) -> Bound {
     if k < 0 {
         return (k * b.1, k * b.0);
     } else {
         return (k * b.0, k * b.1);
     }
-}
-
-/// Calculates the span (range) of a bound.
-///
-/// # Arguments
-/// * `b` - A bound tuple (min, max)
-///
-/// # Returns
-/// The absolute difference between max and min values
-fn bound_span(b: Bound) -> i64 {
-    return (b.1 - b.0).abs();
 }
 
 /// Sparse representation of an integer matrix.
@@ -118,7 +84,7 @@ pub struct SparseIntegerMatrix {
     /// Column indices of non-zero elements  
     pub cols: Vec<usize>,
     /// Values of non-zero elements
-    pub vals: Vec<i64>,
+    pub vals: Vec<i32>,
     /// Matrix dimensions: (number_of_rows, number_of_columns)
     pub shape: (usize, usize),
 }
@@ -140,7 +106,7 @@ impl fmt::Display for SparseIntegerMatrix {
 #[derive(Clone)]
 pub struct DenseIntegerMatrix {
     /// Matrix data stored as a vector of rows
-    pub data: Vec<Vec<i64>>,
+    pub data: Vec<Vec<i32>>,
     /// Matrix dimensions: (number_of_rows, number_of_columns)
     pub shape: (usize, usize),
 }
@@ -186,7 +152,7 @@ impl DenseIntegerMatrix {
     ///
     /// # Panics
     /// May panic if the vector length doesn't match the matrix column count
-    pub fn dot_product(&self, vector: &Vec<i64>) -> Vec<i64> {
+    pub fn dot_product(&self, vector: &Vec<i32>) -> Vec<i32> {
         let mut result = vec![0; self.shape.0];
         for i in 0..self.shape.0 {
             for j in 0..self.shape.1 {
@@ -206,13 +172,11 @@ impl DenseIntegerMatrix {
 #[derive(Clone)]
 pub struct DensePolyhedron {
     /// Constraint matrix A
-    pub A: DenseIntegerMatrix,
+    pub a: DenseIntegerMatrix,
     /// Right-hand side vector b
-    pub b: Vec<i64>,
+    pub b: Vec<i32>,
     /// Variable names corresponding to matrix columns
     pub columns: Vec<String>,
-    /// Subset of columns that represent integer variables
-    pub integer_columns: Vec<String>,
     /// Column bounds
     pub column_bounds: Vec<Bound>,
 }
@@ -228,7 +192,7 @@ impl fmt::Display for DensePolyhedron {
             )?;
         }
         writeln!(f)?;
-        for (ir, row) in self.A.data.iter().enumerate() {
+        for (ir, row) in self.a.data.iter().enumerate() {
             for val in row {
                 write!(f, "{:>space$} ", val)?;
             }
@@ -248,8 +212,8 @@ impl DensePolyhedron {
     /// # Returns
     /// A vector where each position corresponds to a column in the polyhedron,
     /// with values from the assignment map or 0 if not assigned
-    pub fn to_vector(&self, from_assignments: &HashMap<String, i64>) -> Vec<i64> {
-        let mut vector: Vec<i64> = vec![0; self.columns.len()];
+    pub fn to_vector(&self, from_assignments: &HashMap<String, i32>) -> Vec<i32> {
+        let mut vector: Vec<i32> = vec![0; self.columns.len()];
         for (index, v) in from_assignments.iter().filter_map(|(k, v)| {
             self.columns
                 .iter()
@@ -271,16 +235,15 @@ impl DensePolyhedron {
     ///
     /// # Returns
     /// A new `DensePolyhedron` with the specified variables eliminated
-    pub fn assume(&self, values: &HashMap<String, i64>) -> DensePolyhedron {
+    pub fn assume(&self, values: &HashMap<String, i32>) -> DensePolyhedron {
         // 1) Make mutable copies of everything
-        let mut new_A_data = self.A.data.clone(); // Vec<Vec<i64>>
-        let mut new_b = self.b.clone(); // Vec<i64>
+        let mut new_a_data = self.a.data.clone(); // Vec<Vec<i32>>
+        let mut new_b = self.b.clone(); // Vec<i32>
         let mut new_columns = self.columns.clone(); // Vec<String>
-        let mut new_int_cols = self.integer_columns.clone(); // Vec<String>
 
         // 2) Find which columns we’re going to remove, along with their assigned values.
         //    We capture (idx_in_matrix, column_name, assigned_value).
-        let mut to_remove: Vec<(usize, String, i64)> = values
+        let mut to_remove: Vec<(usize, String, i32)> = values
             .iter()
             .filter_map(|(name, &val)| {
                 // look up current index of `name` in self.columns
@@ -299,39 +262,41 @@ impl DensePolyhedron {
         //      - b := b - A[:, idx] * val
         //      - remove column idx from every row of A
         //      - remove from columns and integer_columns
-        for (col_idx, col_name, fixed_val) in to_remove {
-            for row in 0..new_A_data.len() {
+        for (col_idx, _, fixed_val) in to_remove {
+            for row in 0..new_a_data.len() {
                 // subtract A[row][col_idx] * fixed_val from b[row]
-                new_b[row] -= new_A_data[row][col_idx] * fixed_val;
+                new_b[row] -= new_a_data[row][col_idx] * fixed_val;
                 // now remove that column entry
-                new_A_data[row].remove(col_idx);
+                new_a_data[row].remove(col_idx);
             }
             // drop the column name
             new_columns.remove(col_idx);
-            // if it was an integer column, drop it too
-            new_int_cols.retain(|c| c != &col_name);
         }
 
         // 5) Rebuild the DenseIntegerMatrix with updated shape
-        let new_shape = (new_A_data.len(), new_columns.len());
-        let new_A = DenseIntegerMatrix {
-            data: new_A_data,
+        let new_shape = (new_a_data.len(), new_columns.len());
+        let new_a = DenseIntegerMatrix {
+            data: new_a_data,
             shape: new_shape,
         };
 
         // 6) Return the shrunken polyhedron
         DensePolyhedron {
-            A: new_A,
+            a: new_a,
             b: new_b,
             columns: new_columns,
-            integer_columns: new_int_cols,
-            column_bounds: self.column_bounds.iter().enumerate().filter_map(|(i, b)| {
-                if !values.contains_key(&self.columns[i]) {
-                    Some(*b)
-                } else {
-                    None
-                }
-            }).collect(),
+            column_bounds: self
+                .column_bounds
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| {
+                    if !values.contains_key(&self.columns[i]) {
+                        Some(*b)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -356,20 +321,20 @@ impl DensePolyhedron {
         }
 
         let lower_result = self
-            .A
+            .a
             .dot_product(&self.to_vector(&lower_bounds))
             .iter()
             .zip(&self.b)
             .all(|(a, b)| a >= b);
 
         let upper_result = self
-            .A
+            .a
             .dot_product(&self.to_vector(&upper_bounds))
             .iter()
             .zip(&self.b)
             .all(|(a, b)| a >= b);
 
-        (lower_result as i64, upper_result as i64)
+        (lower_result as i32, upper_result as i32)
     }
 }
 
@@ -427,37 +392,25 @@ impl SparseIntegerMatrix {
 #[derive(Hash, Clone)]
 pub struct SparsePolyhedron {
     /// Sparse constraint matrix A
-    pub A: SparseIntegerMatrix,
+    pub a: SparseIntegerMatrix,
     /// Right-hand side vector b
-    pub b: Vec<i64>,
+    pub b: Vec<i32>,
     /// Variable names corresponding to matrix columns
     pub columns: Vec<String>,
-    /// Subset of columns that represent integer variables
-    pub integer_columns: Vec<String>,
     /// Column bounds
     pub column_bounds: Vec<Bound>,
 }
 
-impl SparsePolyhedron {
-    fn get_hash(&self) -> u64 {
-        let mut state = DefaultHasher::new();
-        // Hash the SparseIntegerMatrix A
-        self.hash(&mut state);
-        state.finish()
-    }
-}
-
 impl From<SparsePolyhedron> for DensePolyhedron {
     fn from(sparse: SparsePolyhedron) -> DensePolyhedron {
-        let mut dense_matrix = DenseIntegerMatrix::new(sparse.A.shape.0, sparse.A.shape.1);
-        for ((&row, &col), &val) in sparse.A.rows.iter().zip(&sparse.A.cols).zip(&sparse.A.vals) {
+        let mut dense_matrix = DenseIntegerMatrix::new(sparse.a.shape.0, sparse.a.shape.1);
+        for ((&row, &col), &val) in sparse.a.rows.iter().zip(&sparse.a.cols).zip(&sparse.a.vals) {
             dense_matrix.data[row][col] = val;
         }
         DensePolyhedron {
-            A: dense_matrix,
+            a: dense_matrix,
             b: sparse.b,
             columns: sparse.columns,
-            integer_columns: sparse.integer_columns,
             column_bounds: sparse.column_bounds,
         }
     }
@@ -468,7 +421,7 @@ impl From<DensePolyhedron> for SparsePolyhedron {
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         let mut vals = Vec::new();
-        for (i, row) in dense.A.data.iter().enumerate() {
+        for (i, row) in dense.a.data.iter().enumerate() {
             for (j, &val) in row.iter().enumerate() {
                 if val != 0 {
                     rows.push(i);
@@ -478,39 +431,24 @@ impl From<DensePolyhedron> for SparsePolyhedron {
             }
         }
         SparsePolyhedron {
-            A: SparseIntegerMatrix {
+            a: SparseIntegerMatrix {
                 rows,
                 cols,
                 vals,
-                shape: dense.A.shape,
+                shape: dense.a.shape,
             },
             b: dense.b,
             columns: dense.columns,
-            integer_columns: dense.integer_columns,
             column_bounds: dense.column_bounds,
         }
     }
 }
 
 /// Represents a coefficient in a linear constraint: (variable_name, coefficient_value).
-pub type Coefficient = (String, i64);
+pub type Coefficient = (String, i32);
 
 /// Maps node IDs to their bound values.
 pub type Assignment = IndexMap<ID, Bound>;
-
-/// Represents bounds for floating-point coefficient values.
-pub type VBound = (f64, f64);
-
-/// Combines integer bounds with floating-point coefficient bounds.
-pub type MultiBound = (Bound, VBound);
-
-/// Maps node IDs to their bounds and accumulated coefficients.
-pub type ValuedAssignment = IndexMap<ID, MultiBound>;
-
-pub struct Presolved {
-    pub tightened: Pldag,  // the new graph
-    pub fixed: Assignment, // id → (v,v)   (0..1 vars only)
-}
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Hash)]
 /// Represents a linear constraint in the form: sum(coeff_i * var_i) + bias >= 0.
@@ -555,8 +493,8 @@ impl Constraint {
     pub fn evaluate(&self, values: &IndexMap<String, Bound>) -> Bound {
         let bound = self.dot(values);
         return (
-            (bound.0 + self.bias.0 >= 0) as i64,
-            (bound.1 + self.bias.1 >= 0) as i64,
+            (bound.0 + self.bias.0 >= 0) as i32,
+            (bound.1 + self.bias.1 >= 0) as i32,
         );
     }
 
@@ -588,9 +526,6 @@ pub enum Node {
     Primitive(Bound),
 }
 
-/// A list of references to other node IDs.
-type References = Vec<String>;
-
 /// A Primitive Logic Directed Acyclic Graph (PL-DAG).
 ///
 /// The PL-DAG represents a logical system where:
@@ -601,7 +536,7 @@ type References = Vec<String>;
 /// The DAG structure ensures no cycles and enables efficient bottom-up propagation.
 pub struct Pldag {
     /// Store for mapping node IDs to their corresponding nodes, supporting multiple access patterns
-    pub storage: Box<dyn KeyValueStore>,
+    pub storage: Box<dyn NodeStoreTrait>,
 }
 
 impl Pldag {
@@ -611,43 +546,12 @@ impl Pldag {
     /// A new `Pldag` instance with no nodes
     pub fn new() -> Pldag {
         Pldag {
-            storage: Box::new(crate::storage::InMemoryStore::new()),
+            storage: Box::new(NodeStore::new(Box::new(InMemoryStore::new()))),
         }
     }
 
-    pub fn new_custom(storage: Box<dyn KeyValueStore>) -> Pldag {
-        Pldag {
-            storage,
-        }
-    }
-
-    fn get_incoming(&self, ids: Vec<&str>) -> Vec<Node> {
-        let results = self.storage
-            .mget(&ids.iter().map(|s| s.to_string()).collect::<Vec<String>>());
-
-        // Preserve the order of the input ids by looking up each key in the HashMap
-        ids.iter()
-            .filter_map(|id| {
-                results.get(&id.to_string())
-                    .and_then(|v| serde_json::from_value::<Node>(v.clone()).ok())
-            })
-            .collect()
-    }
-
-    fn get_outgoing_ids(&self, ids: Vec<&str>) -> Vec<References> {
-        let keys: Vec<String> = ids.iter()
-            .map(|s| format!("__outgoing__{}", s))
-            .collect();
-        let results = self.storage.mget(&keys);
-
-        // Preserve the order of the input ids by looking up each key in the HashMap
-        keys.iter()
-            .map(|key| {
-                results.get(key)
-                    .and_then(|v| serde_json::from_value::<References>(v.clone()).ok())
-                    .unwrap_or_default()
-            })
-            .collect()
+    pub fn new_custom(storage: Box<dyn NodeStoreTrait>) -> Pldag {
+        Pldag { storage }
     }
 
     /// Propagates bounds through the DAG bottom-up.
@@ -664,53 +568,60 @@ impl Pldag {
     where
         K: ToString,
     {
-        let mut results = assignments.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<Assignment>();
+        let mut results = assignments
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<Assignment>();
 
         // Extract all keys from the initial assignments
-        let batch_keys: Vec<String> = results.keys().cloned().collect();
-        let batch: Vec<String> = batch_keys.iter().map(|k| k.to_string()).collect();
-        let mut queue: VecDeque<Vec<String>> = VecDeque::new();
-        queue.push_back(batch.clone());
+        let mut queue: Vec<String> = results.keys().cloned().collect();
 
         let mut visited = HashSet::new();
-        while let Some(current_batch) = queue.pop_front() {
-            visited.extend(current_batch.iter().cloned());
-
+        while queue.len() > 0 {
             let mut next_batch: Vec<String> = Vec::new();
-            let batch_incoming = self.get_incoming(current_batch.iter().map(|s| s.as_str()).collect());
+            let mut processed_this_batch: Vec<String> = Vec::new();
+            let batch_incoming = self.storage.get_nodes(&queue);
 
-            for (i, node) in batch_incoming.iter().enumerate() {
-                let node_id = current_batch[i].clone();
+            // Loop over all nodes in queue
+            while let Some(node_id) = queue.pop() {
+                if visited.contains(&node_id) {
+                    continue; // Already processed this node
+                }
+
                 if results.contains_key(&node_id) {
+                    // Mark as visited and processed
+                    visited.insert(node_id.clone());
+                    processed_this_batch.push(node_id.clone());
                     continue; // Already have result for this node
                 }
+
+                let node = match batch_incoming.get(&node_id) {
+                    Some(n) => n,
+                    None => panic!("Node id {} not found in storage", node_id),
+                };
+
                 match node {
                     Node::Primitive(primitive) => {
                         // Primitive nodes already have their bounds set
-                        results.insert(
-                            node_id.to_string(),
-                            *primitive,
-                        );
+                        results.insert(node_id.to_string(), *primitive);
+                        visited.insert(node_id.clone());
+                        processed_this_batch.push(node_id.clone());
                     }
                     Node::Composite(constraint) => {
                         // Filter coefficients and calculate bias
-                        let coefficients: HashMap<String, i64> = constraint
-                                                    .coefficients
-                                                    .iter()
-                                                    .cloned()
-                                                    .collect();
-
-                        let bias: i64 = constraint.bias.0; // Using lower bound for bias
+                        let bias: i32 = constraint.bias.0; // Using lower bound for bias
+                        let coefficients = &constraint.coefficients;
 
                         // Check if all input variables are in results
                         let all_inputs_available = coefficients
-                            .keys()
-                            .all(|input_id| results.contains_key(input_id));
+                            .iter()
+                            .all(|(input_id, _)| results.contains_key(input_id));
 
                         if !all_inputs_available {
                             // Put the missing coefficients back to the queue
-                            for input_id in coefficients.keys() {
-                                if !results.contains_key(input_id) && !next_batch.contains(input_id) {
+                            for (input_id, _) in coefficients.iter() {
+                                if !results.contains_key(input_id) && !next_batch.contains(input_id)
+                                {
                                     next_batch.push(input_id.clone());
                                 }
                             }
@@ -721,42 +632,45 @@ impl Pldag {
 
                         // Get coefficient values from results
                         let mut coef_vals = HashMap::new();
-                        for input_id in coefficients.keys() {
+                        for (input_id, _) in coefficients.iter() {
                             if let Some(val) = results.get(input_id) {
                                 coef_vals.insert(input_id.clone(), val.clone());
                             }
                         }
 
                         // Calculate result
-                        let multiplied: Vec<(i64, i64)> = coefficients
+                        let multiplied: Vec<(i32, i32)> = coefficients
                             .iter()
                             .map(|(input_id, coef)| {
                                 bound_multiply(*coef, *coef_vals.get(input_id).unwrap())
                             })
                             .collect();
 
-                        let summed = multiplied
-                            .iter()
-                            .fold((0, 0), |acc, b| bound_add(acc, *b));
+                        let summed = multiplied.iter().fold((0, 0), |acc, b| bound_add(acc, *b));
                         let biased = bound_add(summed, (bias, bias));
 
-                        results.insert(node_id.to_string(), ((biased.0 >= 0) as i64, (biased.1 >= 0) as i64));
+                        results.insert(
+                            node_id.to_string(),
+                            ((biased.0 >= 0) as i32, (biased.1 >= 0) as i32),
+                        );
+                        visited.insert(node_id.clone());
+                        processed_this_batch.push(node_id.clone());
                     }
                 }
             }
 
             // Add dependent nodes to next batch
-            let batch_outgoing = self.get_outgoing_ids(current_batch.iter().map(|s| s.as_str()).collect());
-            for outgoing in batch_outgoing.into_iter() {
+            let batch_outgoing = self.storage.get_parent_ids(&processed_this_batch);
+            for outgoing in batch_outgoing.values() {
                 for dependent in outgoing.into_iter() {
-                    if !visited.contains(dependent.as_str()) && !next_batch.contains(&dependent) {
-                        next_batch.push(dependent);
+                    if !visited.contains(dependent) && !next_batch.contains(&dependent) {
+                        next_batch.push(dependent.clone());
                     }
                 }
             }
 
             if !next_batch.is_empty() {
-                queue.push_back(next_batch);
+                queue = next_batch;
             }
         }
 
@@ -789,68 +703,72 @@ impl Pldag {
     /// Vector of optional valued assignments, one for each objective. None if infeasible.
     pub fn solve(
         &self,
+        roots: Vec<ID>,
         objectives: Vec<HashMap<&str, f64>>,
         assume: HashMap<&str, Bound>,
         maximize: bool,
-    ) -> Result<Vec<Option<Assignment>>, String> {
+    ) -> Vec<Option<Assignment>> {
         use glpk_rust::{
             solve_ilps, IntegerSparseMatrix, Solution, SparseLEIntegerPolyhedron, Status, Variable,
         };
 
         // Convert the PL-DAG to a polyhedron representation
-        let polyhedron = self.to_sparse_polyhedron(
-            assume.iter().map(|(k, v)| (k.to_string(), *v)).collect::<HashMap<String, Bound>>(),
-            true,
-            true,
-            true,
-        )?;
+        let polyhedron = self.to_sparse_polyhedron(roots, true);
 
-        println!("Polyhedron for ILP solving:\n{}", DensePolyhedron::from(polyhedron.clone()));
+        // Validate assume that the bounds does not override column bounds
+        for (key, bound) in assume.iter() {
+            if let Some(idx) = polyhedron.columns.iter().position(|col| col == key) {
+                let col_bound = polyhedron.column_bounds[idx];
+                if bound.0 < col_bound.0 || bound.1 > col_bound.1 {
+                    return vec![None; objectives.len()];
+                }
+            }
+        }
 
         // Convert sparse matrix to the format expected by glpk-rust
         // NOTE: As soon as the polyhedron is made, the order of the columns are vital.
         // Therefore always use polyhedron.columns to get the variable names in the correct order.
         let mut glpk_matrix = SparseLEIntegerPolyhedron {
-            A: IntegerSparseMatrix {
-                rows: polyhedron.A.rows.iter().map(|&x| x as i32).collect(),
-                cols: polyhedron.A.cols.iter().map(|&x| x as i32).collect(),
-                vals: polyhedron.A.vals.iter().map(|&x| -1 * x as i32).collect(),
+            a: IntegerSparseMatrix {
+                rows: polyhedron.a.rows.iter().map(|&x| x as i32).collect(),
+                cols: polyhedron.a.cols.iter().map(|&x| x as i32).collect(),
+                vals: polyhedron.a.vals.iter().map(|&x| -1 * x).collect(),
             },
-            b: polyhedron.b.iter().map(|&x| (0, -1 * x as i32)).collect(),
+            b: polyhedron.b.iter().map(|&x| (0, -1 * x)).collect(),
             variables: polyhedron
                 .columns
                 .iter()
                 .zip(polyhedron.column_bounds.iter())
-                .map(|(key, bound)| {
-                    Variable {
-                        id: key.as_str(),
-                        bound: (bound.0 as i32, bound.1 as i32),
-                    }
+                .map(|(key, bound)| Variable {
+                    id: key.as_str(),
+                    bound: *assume.get(key.as_str()).unwrap_or(&(bound.0, bound.1)),
                 })
                 .collect(),
             double_bound: false,
         };
 
         // If there are no constraints, insert a dummy row
-        if glpk_matrix.A.rows.is_empty() {
+        if glpk_matrix.a.rows.is_empty() {
             for i in 0..polyhedron.columns.len() {
-                glpk_matrix.A.rows.push(i as i32);
-                glpk_matrix.A.cols.push(i as i32);
-                glpk_matrix.A.vals.push(0);
+                glpk_matrix.a.rows.push(0);
+                glpk_matrix.a.cols.push(i as i32);
+                glpk_matrix.a.vals.push(0);
             }
             glpk_matrix.b.push((0, 0));
         }
 
-        let mut solutions: Vec<Solution> = Vec::default();
-        #[cfg(feature = "trace")] {
+        let solutions: Vec<Solution>;
+        #[cfg(feature = "trace")]
+        {
             let span = tracing::span!(tracing::Level::INFO, "solve_ilps");
             solutions = span.in_scope(|| solve_ilps(&mut glpk_matrix, objectives, maximize, false));
         }
-        #[cfg(not(feature = "trace"))] {
+        #[cfg(not(feature = "trace"))]
+        {
             solutions = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
         }
 
-        return Ok(solutions
+        return solutions
             .iter()
             .map(|solution| {
                 if solution.status == Status::Optimal {
@@ -864,76 +782,60 @@ impl Pldag {
                     None
                 }
             })
-            .collect());
+            .collect();
     }
 
-    pub fn sub_tree(&self, roots: Vec<String>) -> HashMap<String, Node> {
+    /// Extracts a sub-DAG containing all nodes reachable from the given roots.
+    /// NOTE: if roots is empty, returns the entire DAG.
+    ///
+    /// # Arguments
+    /// * `roots` - Vector of root node IDs to start the sub-DAG extraction
+    ///
+    /// # Returns
+    /// A HashMap representing the sub-DAG with node IDs as keys and Nodes as values
+    pub fn sub_dag(&self, roots: Vec<ID>) -> HashMap<ID, Node> {
         // By default use Rust implementation
-        self.sub_tree_rust(roots)
-    }
-
-    pub fn tree(&self) -> HashMap<String, Node> {
-        // Get all root nodes (nodes with no incoming edges)
-        let keys = self
-            .storage
-            .keys("*")
-            .into_iter()
-            .filter(|k| !k.starts_with("__outgoing__"))
-            .collect::<Vec<_>>();
-
-        let data = self.get_incoming(keys.iter().map(|s| s.as_str()).collect());
-        keys.into_iter()
-            .zip(data.into_iter())
-            .collect::<HashMap<String, Node>>()
-    }
-
-    /// Rust-based subtree traversal (fallback for non-Redis stores)
-    /// Returns: HashMap<node_id, (incoming_edges, domain)>
-    fn sub_tree_rust(&self, roots: Vec<String>) -> HashMap<String, Node> {
-
         // If no roots, return empty tree
         if roots.is_empty() {
-            return self.tree();
+            return self.dag();
         }
-        
-        // Use a single visited set for O(1) lookups
-        let mut visited = HashSet::new();
-        let mut queue: VecDeque<Vec<String>> = VecDeque::new();
-        queue.push_back(roots.iter().map(|s| s.to_string()).collect());
+
+        let mut queue: Vec<String> = roots;
 
         // Accumulate nodes for larger batches
-        let mut sub_tree: HashMap<String, Node> = HashMap::new();
+        let mut sub_dag: HashMap<String, Node> = HashMap::new();
 
-        while let Some(current_batch) = queue.pop_front() {
+        while queue.len() > 0 {
             // Batch fetch incoming edges for current batch
-            let all_incoming = self.get_incoming(current_batch.iter().map(|s| s.as_str()).collect());
+            let all_incoming = self.storage.get_nodes(&queue);
             let mut next_batch = Vec::new();
 
-            for (input_id, incoming) in current_batch.iter().zip(all_incoming.iter()) {
-                sub_tree.insert(input_id.clone(), incoming.clone());
-                // HashSet.insert returns false if already present
-                if visited.insert(input_id.clone()) {
-                    match incoming {
-                        Node::Primitive(_) => {}
-                        Node::Composite(constraint) => {
-                            // Enqueue all coefficient variable IDs
-                            for (coef_id, _) in constraint.coefficients.iter() {
-                                if !visited.contains(coef_id.as_str()) && !next_batch.contains(coef_id) {
-                                    next_batch.push(coef_id.clone());
-                                }
+            for (input_id, incoming) in all_incoming.iter() {
+                match incoming {
+                    Node::Primitive(_) => {}
+                    Node::Composite(constraint) => {
+                        // Enqueue all coefficient variable IDs
+                        for (coef_id, _) in constraint.coefficients.iter() {
+                            if sub_dag.contains_key(coef_id) {
+                                panic!("Cycle detected in PL-DAG at node '{}'", coef_id);
+                            }
+                            if !next_batch.contains(coef_id) {
+                                next_batch.push(coef_id.clone());
                             }
                         }
                     }
-                    next_batch.push(input_id.clone());
                 }
+                next_batch.push(input_id.clone());
+                sub_dag.insert(input_id.clone(), incoming.clone());
             }
-
-            if !next_batch.is_empty() {
-                queue.push_back(next_batch);
-            }
+            queue = next_batch;
         }
 
-        sub_tree
+        sub_dag
+    }
+
+    pub fn dag(&self) -> HashMap<ID, Node> {
+        self.storage.get_all_nodes()
     }
 
     /// Converts the PL-DAG to a sparse polyhedron for ILP solving.
@@ -943,32 +845,16 @@ impl Pldag {
     ///
     /// # Arguments
     /// * `double_binding` - If true, creates bidirectional implications for composite nodes
-    /// * `integer_constraints` - If true, adds bounds constraints for integer variables
-    /// * `fixed_constraints` - If true, adds equality constraints for fixed primitive variables
     ///
     /// # Returns
     /// A `SparsePolyhedron` representing the DAG constraints
-    pub fn to_sparse_polyhedron(
-        &self,
-        assume: HashMap<String, Bound>,
-        double_binding: bool,
-        integer_constraints: bool,
-        fixed_constraints: bool,
-    ) -> Result<SparsePolyhedron, String> {
-
+    pub fn to_sparse_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> SparsePolyhedron {
         // Create a new sparse matrix
-        let mut A_matrix = SparseIntegerMatrix::new();
-        let mut b_vector: Vec<i64> = Vec::new();
+        let mut a_matrix = SparseIntegerMatrix::new();
+        let mut b_vector: Vec<i32> = Vec::new();
 
         // Get the sub tree from the roots
-        let sub_dag = self.sub_tree(assume.keys().cloned().collect());
-
-        // Check that the assume keys are all in the sub_dag. If not, return an error.
-        for key in assume.keys() {
-            if !sub_dag.contains_key(key) {
-                return Err(format!("Assume key '{}' not found in PL-DAG", key));
-            }
-        }
+        let sub_dag = self.sub_dag(roots.clone());
 
         // Filter out all Nodes that are primitives
         let primitives: IndexMap<&String, Bound> = sub_dag
@@ -1012,12 +898,19 @@ impl Pldag {
             let ki = *column_names_map.get(key).unwrap();
 
             // Construct the inner bound of the composite
-            let coef_bounds = composite.coefficients.iter().map(|(coef_key, _)| {
-                            (coef_key.clone(), match sub_dag.get(coef_key) {
-                                Some(Node::Primitive(bound)) => *bound,
-                                _ => (0, 1),
-                            })
-                        }).collect::<IndexMap<String, Bound>>();
+            let coef_bounds = composite
+                .coefficients
+                .iter()
+                .map(|(coef_key, _)| {
+                    (
+                        coef_key.clone(),
+                        match sub_dag.get(coef_key) {
+                            Some(Node::Primitive(bound)) => *bound,
+                            _ => (0, 1),
+                        },
+                    )
+                })
+                .collect::<IndexMap<String, Bound>>();
 
             // An inner bound $\text{ib}(\phi)$ of a
             // linear inequality constraint $\phi$ is the sum of all variable's
@@ -1028,20 +921,20 @@ impl Pldag {
             // highest value is $2$ (from $x=0, y=1, z=1$).
             let ib_phi = composite.dot(&coef_bounds);
 
-            // 1. Let $d = max(|ib(phi)|)$.
-            let d_pi = std::cmp::max(ib_phi.0.abs(), ib_phi.1.abs());
+            // 1. Let $d = max(|ib(phi)|) + |bias|$.
+            let d_pi = std::cmp::max(ib_phi.0.abs(), ib_phi.1.abs()) + composite.bias.0.abs();
 
             // Push values for pi variable coefficient
-            A_matrix.rows.push(row_i);
-            A_matrix.cols.push(ki);
-            A_matrix.vals.push(-d_pi);
+            a_matrix.rows.push(row_i);
+            a_matrix.cols.push(ki);
+            a_matrix.vals.push(-d_pi);
 
             // Push values for phi coefficients
             for (coef_key, coef_val) in composite.coefficients.iter() {
                 let ck_index: usize = *column_names_map.get(coef_key).unwrap();
-                A_matrix.rows.push(row_i);
-                A_matrix.cols.push(ck_index);
-                A_matrix.vals.push(*coef_val);
+                a_matrix.rows.push(row_i);
+                a_matrix.cols.push(ck_index);
+                a_matrix.vals.push(*coef_val);
             }
 
             // Push bias value
@@ -1063,16 +956,16 @@ impl Pldag {
                 let pi_coef = d_phi_prim - phi_prim.bias.0;
 
                 // Push values for pi variable coefficient
-                A_matrix.rows.push(row_i + 1);
-                A_matrix.cols.push(ki);
-                A_matrix.vals.push(pi_coef);
+                a_matrix.rows.push(row_i + 1);
+                a_matrix.cols.push(ki);
+                a_matrix.vals.push(pi_coef);
 
                 // Push values for phi coefficients
                 for (phi_coef_key, phi_coef_val) in phi_prim.coefficients.iter() {
                     let ck_index: usize = *column_names_map.get(phi_coef_key).unwrap();
-                    A_matrix.rows.push(row_i + 1);
-                    A_matrix.cols.push(ck_index);
-                    A_matrix.vals.push(*phi_coef_val);
+                    a_matrix.rows.push(row_i + 1);
+                    a_matrix.cols.push(ck_index);
+                    a_matrix.vals.push(*phi_coef_val);
                 }
 
                 // Push bias value
@@ -1086,97 +979,26 @@ impl Pldag {
             row_i += 1;
         }
 
-        if fixed_constraints {
-            // Add the bounds for the primitive variables that are fixed.
-            // We start by creating a grouping on the lower and upper bounds of the primitive variables
-            let mut fixed_bound_map: IndexMap<i64, Vec<usize>> = IndexMap::new();
-            for (key, bound) in primitives.iter().filter(|(_, bound)| bound_fixed(**bound)) {
-                fixed_bound_map
-                    .entry(bound.0)
-                    .or_insert_with(Vec::new)
-                    .push(*column_names_map.get(key.as_str()).unwrap());
-            }
-
-            for (v, primitive_ids) in fixed_bound_map.iter() {
-                let b = *v * primitive_ids.len() as i64;
-                for i in vec![-1, 1] {
-                    for primitive_id in primitive_ids {
-                        A_matrix.rows.push(row_i);
-                        A_matrix.cols.push(*primitive_id);
-                        A_matrix.vals.push(i);
-                    }
-                    b_vector.push(i * b);
-                    row_i += 1;
-                }
-            }
-        }
-
-        // Collect all integer variables
-        let mut integer_variables: Vec<String> = Vec::new();
-
-        // Restrain integer bounds
-        for (p_key, p_bound) in primitives
-            .iter()
-            .filter(|(_, bound)| bound.0 < 0 || bound.1 > 1)
-        {
-            // Add the variable to the integer variables list
-            integer_variables.push((*p_key).clone());
-
-            if integer_constraints {
-                // Get the index of the current key
-                let pi = *column_names_map.get(p_key.as_str()).unwrap();
-
-                A_matrix.rows.push(row_i);
-                A_matrix.cols.push(pi);
-                A_matrix.vals.push(1);
-                b_vector.push(p_bound.0);
-                row_i += 1;
-
-                A_matrix.rows.push(row_i);
-                A_matrix.cols.push(pi);
-                A_matrix.vals.push(-1);
-                b_vector.push(-1 * p_bound.1);
-                row_i += 1;
-            }
-        }
-
-        // Set an lower and upper bound for the variables in assume
-        for (a_key, a_bound) in assume.iter() {
-            // Get the index of the current key
-            let ai = *column_names_map.get(a_key.as_str()).unwrap();
-
-            A_matrix.rows.push(row_i);
-            A_matrix.cols.push(ai);
-            A_matrix.vals.push(1);
-            b_vector.push(a_bound.0);
-            row_i += 1;
-
-            A_matrix.rows.push(row_i);
-            A_matrix.cols.push(ai);
-            A_matrix.vals.push(-1);
-            b_vector.push(-1 * a_bound.1);
-            row_i += 1;
-        }
-
         // Set the shape of the A matrix
-        A_matrix.shape = (row_i, column_names_map.len());
+        a_matrix.shape = (row_i, column_names_map.len());
 
         // Create the polyhedron
         let polyhedron = SparsePolyhedron {
-            A: A_matrix,
+            a: a_matrix,
             b: b_vector,
             columns: column_names_map.keys().cloned().collect(),
-            integer_columns: integer_variables,
             column_bounds: column_names_map
                 .keys()
-                .map(|key| (match sub_dag.get(key) {
-                                Some(Node::Primitive(bound)) => *bound,
-                                _ => (0, 1),
-                            }))
+                .map(|key| {
+                    (match sub_dag.get(key) {
+                        Some(Node::Primitive(bound)) => *bound,
+                        _ => (0, 1),
+                    })
+                })
                 .collect(),
         };
 
-        return Ok(polyhedron);
+        return polyhedron;
     }
 
     /// Converts the PL-DAG to a sparse polyhedron with default settings.
@@ -1186,39 +1008,30 @@ impl Pldag {
     ///
     /// # Returns
     /// A `SparsePolyhedron` with full constraint encoding
-    pub fn to_sparse_polyhedron_default(&self, assume: HashMap<String, Bound>) -> Result<SparsePolyhedron, String> {
-        self.to_sparse_polyhedron(assume, true, true, true)
+    pub fn to_sparse_polyhedron_default(&self, roots: Vec<ID>) -> SparsePolyhedron {
+        self.to_sparse_polyhedron(roots, true)
     }
 
     /// Converts the PL-DAG to a dense polyhedron.
     ///
     /// # Arguments
     /// * `double_binding` - If true, creates bidirectional implications
-    /// * `integer_constraints` - If true, adds integer bounds constraints
-    /// * `fixed_constraints` - If true, adds fixed variable constraints
     ///
     /// # Returns
     /// A `DensePolyhedron` representing the DAG constraints
-    pub fn to_dense_polyhedron(
-        &self,
-        assume: HashMap<String, Bound>,
-        double_binding: bool,
-        integer_constraints: bool,
-        fixed_constraints: bool,
-    ) -> Result<DensePolyhedron, String> {
+    pub fn to_dense_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> DensePolyhedron {
         // Convert to sparse polyhedron first
-        let sparse_polyhedron =
-            self.to_sparse_polyhedron(assume, double_binding, integer_constraints, fixed_constraints)?;
+        let sparse_polyhedron = self.to_sparse_polyhedron(roots, double_binding);
         // Convert sparse to dense polyhedron
-        Ok(sparse_polyhedron.into())
+        sparse_polyhedron.into()
     }
 
     /// Converts the PL-DAG to a dense polyhedron with default settings.
     ///
     /// # Returns
     /// A `DensePolyhedron` with all constraint options enabled
-    pub fn to_dense_polyhedron_default(&self, assume: HashMap<String, Bound>) -> Result<DensePolyhedron, String> {
-        self.to_dense_polyhedron(assume, true, true, true)
+    pub fn to_dense_polyhedron_default(&self, roots: Vec<ID>) -> DensePolyhedron {
+        self.to_dense_polyhedron(roots, true)
     }
 
     /// Retrieves all primitive variables from the given PL-DAG roots.
@@ -1226,14 +1039,17 @@ impl Pldag {
     /// # Returns
     /// An `IndexMap` mapping variable IDs to their corresponding `Bound` objects
     pub fn get_primitives(&self, roots: Vec<String>) -> IndexMap<String, Bound> {
-        let sub_dag = self.sub_tree(roots);
-        sub_dag.iter().filter_map(|(key, node)| {
-            if let Node::Primitive(bound) = node {
-                Some((key.clone(), *bound))
-            } else {
-                None
-            }
-        }).collect()
+        let sub_dag = self.sub_dag(roots);
+        sub_dag
+            .iter()
+            .filter_map(|(key, node)| {
+                if let Node::Primitive(bound) = node {
+                    Some((key.clone(), *bound))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Retrieves all composite constraints from the PL-DAG.
@@ -1241,14 +1057,27 @@ impl Pldag {
     /// # Returns
     /// An `IndexMap` mapping constraint IDs to their corresponding `Constraint` objects
     pub fn get_composites(&self, roots: Vec<String>) -> IndexMap<String, Constraint> {
-        let sub_dag = self.sub_tree(roots);
-        sub_dag.iter().filter_map(|(key, node)| {
-            if let Node::Composite(constraint) = node {
-                Some((key.clone(), constraint.clone()))
-            } else {
-                None
-            }
-        }).collect()
+        let sub_dag = self.sub_dag(roots);
+        sub_dag
+            .iter()
+            .filter_map(|(key, node)| {
+                if let Node::Composite(constraint) = node {
+                    Some((key.clone(), constraint.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Retrieves a node by its ID.
+    /// ///
+    /// # Arguments
+    /// * `id` - The unique identifier of the node to retrieve
+    /// # Returns
+    /// An `Option<Node>` which is Some(Node) if found, or None if not found
+    pub fn get_node(&self, id: &str) -> Option<Node> {
+        self.storage.get_nodes(&[id.to_string()]).get(id).cloned()
     }
 
     /// Creates a primitive (leaf) variable with the specified bounds.
@@ -1260,18 +1089,7 @@ impl Pldag {
     /// * `id` - Unique identifier for the variable
     /// * `bound` - The allowed range (min, max) for this variable
     pub fn set_primitive(&mut self, id: &str, bound: Bound) {
-        // Insert the primitive variable as a node
-        self.storage.set(
-            id,
-            serde_json::to_value(Node::Primitive(bound)).unwrap(),
-        );
-        // Set empty outgoing references for this primitive if not already present
-        if !self.storage.exists(&format!("__outgoing__{}", id)) {
-            self.storage.set(
-                &format!("__outgoing__{}", id),
-                serde_json::to_value(Vec::<String>::new()).unwrap(),
-            );
-        }
+        self.storage.set_node(id, Node::Primitive(bound));
     }
 
     /// Creates multiple primitive variables with the same bounds.
@@ -1302,12 +1120,11 @@ impl Pldag {
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
     pub fn set_gelineq<'a>(
         &mut self,
-        coefficient_variables: impl IntoIterator<Item = (&'a str, i64)>,
-        bias: i64,
+        coefficient_variables: impl IntoIterator<Item = (&'a str, i32)>,
+        bias: i32,
     ) -> ID {
-
         // Ensure coefficients have unique keys by summing duplicate values
-        let mut unique_coefficients: IndexMap<ID, i64> = IndexMap::new();
+        let mut unique_coefficients: IndexMap<ID, i32> = IndexMap::new();
         for (key, value) in coefficient_variables {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
@@ -1321,45 +1138,13 @@ impl Pldag {
 
         // Return the hash as a string
         let id = hash.to_string();
-        if self.storage.exists(&id) {
-            // Constraint already exists, return existing ID
-            return id.to_string();
-        }
-
-        // Set empty outgoing references for this constraint, if not already present
-        self.storage.set(
-            &format!("__outgoing__{}", id),
-            serde_json::to_value(Vec::<String>::new()).unwrap(),
-        );
-
         let constraint = Constraint {
             coefficients: coefficient_variables.clone(),
             bias: (bias, bias),
         };
 
         // Insert the constraint as a node
-        self.storage.set(
-            &id,
-            serde_json::to_value(Node::Composite(constraint)).unwrap(),
-        );
-
-        // For each coefficient variable, add this id as an incoming reference
-        // Use mget to batch fetch all incoming references
-        let coef_ids: Vec<&str> = coefficient_variables
-            .iter()
-            .map(|(coef_id, _)| coef_id.as_str())
-            .collect();
-        let coefficient_current_references: Vec<References> = self.get_outgoing_ids(coef_ids.clone());
-
-        for (coef_id, mut current_references) in coef_ids.iter().zip(coefficient_current_references) {
-            if !current_references.contains(&id.to_string()) {
-                current_references.push(id.to_string());
-                self.storage.set(
-                    &format!("__outgoing__{}", coef_id),
-                    serde_json::to_value(current_references).unwrap(),
-                );
-            }
-        }
+        self.storage.set_node(&id, Node::Composite(constraint));
 
         id.to_string()
     }
@@ -1372,7 +1157,11 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atleast<'a>(&mut self, references: impl IntoIterator<Item = &'a str>, value: i64) -> ID {
+    pub fn set_atleast<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str>,
+        value: i32,
+    ) -> ID {
         self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value)
     }
 
@@ -1395,7 +1184,11 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atmost<'a>(&mut self, references: impl IntoIterator<Item = &'a str>, value: i64) -> ID {
+    pub fn set_atmost<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str>,
+        value: i32,
+    ) -> ID {
         self.set_gelineq(references.into_iter().map(|x| (x, -1)), value)
     }
 
@@ -1420,13 +1213,21 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_equal<'a >(&mut self, references: impl IntoIterator<Item = &'a str> + Clone, value: i64) -> ID {
+    pub fn set_equal<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str> + Clone,
+        value: i32,
+    ) -> ID {
         let ub = self.set_atleast(references.clone(), value);
         let lb = self.set_atmost(references, value);
         self.set_and(vec![ub, lb])
     }
 
-    pub fn set_equal_ref<'a >(&mut self, references: impl IntoIterator<Item = &'a str> + Clone, value: &str) -> ID {
+    pub fn set_equal_ref<'a>(
+        &mut self,
+        references: impl IntoIterator<Item = &'a str> + Clone,
+        value: &str,
+    ) -> ID {
         let ub = self.set_atleast_ref(references.clone(), value);
         let lb = self.set_atmost_ref(references, value);
         self.set_and(vec![ub, lb])
@@ -1449,10 +1250,7 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.into()).collect();
         let length = unique_references.len();
-        self.set_atleast(
-            unique_references.iter().map(|x| x.as_str()),
-            length as i64,
-        )
+        self.set_atleast(unique_references.iter().map(|x| x.as_str()), length as i32)
     }
 
     /// Creates a logical OR constraint.
@@ -1493,7 +1291,7 @@ impl Pldag {
         let length = unique_references.len();
         self.set_atmost(
             unique_references.iter().map(|x| x.as_str()),
-            length as i64 - 1,
+            length as i32 - 1,
         )
     }
 
@@ -1633,9 +1431,10 @@ mod tests {
     // Create a helper function that generates all primitive combinations
     // for a given PLDAG model, propagates them, and compares against the
     // corresponding polyhedron evaluations.
-    fn primitive_combinations(model: &Pldag) -> Vec<IndexMap<String, i64>> {
-        let tree = model.tree();
-        let primitives: Vec<&String> = tree.iter()
+    fn primitive_combinations(model: &Pldag) -> Vec<IndexMap<String, i32>> {
+        let tree = model.dag();
+        let primitives: Vec<&String> = tree
+            .iter()
             .filter_map(|(key, node)| {
                 if let Node::Primitive(_) = node {
                     Some(key)
@@ -1644,7 +1443,7 @@ mod tests {
                 }
             })
             .collect();
-        let mut combinations: Vec<IndexMap<String, i64>> = Vec::new();
+        let mut combinations: Vec<IndexMap<String, i32>> = Vec::new();
 
         let num_primitives = primitives.len();
         let num_combinations = 1 << num_primitives; // 2^n combinations
@@ -1810,9 +1609,7 @@ mod tests {
         m.set_primitive("x".into(), (0, 1));
         m.set_primitive("y", (0, 1));
         let root = m.set_and(vec!["x", "y"]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1823,9 +1620,7 @@ mod tests {
         m.set_primitive("b".into(), (0, 1));
         m.set_primitive("c".into(), (0, 1));
         let root = m.set_or(vec!["a", "b", "c"]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1834,9 +1629,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("p".into(), (0, 1));
         let root = m.set_not(vec!["p"]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1847,9 +1640,7 @@ mod tests {
         m.set_primitive("y", (0, 1));
         m.set_primitive("z".into(), (0, 1));
         let root = m.set_xor(vec!["x", "y", "z"]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1865,10 +1656,7 @@ mod tests {
         let w = m.set_and(vec!["x", "y"]);
         let nz = m.set_not(vec!["z"]);
         let v = m.set_or(vec![w.clone(), nz.clone()]);
-
-        let mut assume = HashMap::new();
-        assume.insert(v.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &v);
     }
 
@@ -1965,18 +1753,14 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let polyhedron: DensePolyhedron = model.to_sparse_polyhedron_default(assume).unwrap().into();
+        let polyhedron: DensePolyhedron = model.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model = Pldag::new();
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         let root = model.set_and(vec!["x", "y"]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let polyhedron = model.to_sparse_polyhedron_default(assume).unwrap().into();
+        let polyhedron = model.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model: Pldag = Pldag::new();
@@ -1984,9 +1768,7 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let polyhedron = model.to_sparse_polyhedron_default(assume).unwrap().into();
+        let polyhedron = model.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
     }
 
@@ -1998,9 +1780,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("x".into(), (0, 1));
             let root = m.set_and::<&str>(vec!["x"]);
-            let mut assume = HashMap::new();
-            assume.insert(root.clone(), (1, 1));
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
         // OR(y) == y
@@ -2008,9 +1788,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("y", (0, 1));
             let root = m.set_or(vec!["y"]);
-            let mut assume = HashMap::new();
-            assume.insert(root.clone(), (1, 1));
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
         // XOR(z) == z
@@ -2018,9 +1796,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("z".into(), (0, 1));
             let root = m.set_xor(vec!["z"]);
-            let mut assume = HashMap::new();
-            assume.insert(root.clone(), (1, 1));
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
     }
@@ -2031,9 +1807,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("x".into(), (0, 1));
         let root = m.set_and(vec!["x", "x"]);
-        let mut assume = HashMap::new();
-        assume.insert(root.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -2058,9 +1832,7 @@ mod tests {
         let w2 = m.set_or(vec![w1.clone(), c.to_string()]);
         let w3 = m.set_xor(vec![w2.clone(), d.to_string()]);
         let root = m.set_not(vec![w3.clone()]);
-        let mut root_assume = HashMap::new();
-        root_assume.insert(root.clone(), (1, 1));
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(root_assume).unwrap().into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
