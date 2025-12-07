@@ -16,6 +16,8 @@ categories  = ["science", "mathematics", "algorithms"]
 bimap      = "0.6.3"
 indexmap   = "2.12.1"
 itertools  = "0.14.0"
+serde_json = "1.0.145"
+serde = { version = "1.0.228", features = ["derive"] }
 
 # ───────────────────────────────────────────────────────────
 # 2. GLPK FFI crate — *only* compiled if the `glpk` feature
@@ -23,9 +25,6 @@ itertools  = "0.14.0"
 # ───────────────────────────────────────────────────────────
 glpk-rust = { version = "0.1.11", optional = true, default-features = false }
 tracing = { version = "0.1", optional = true, features = ["attributes"], default-features = false}
-serde_json = "1.0.145"
-glob-match = "0.2.1"
-serde = { version = "1.0.228", features = ["derive"] }
 
 # ───────────────────────────────────────────────────────────
 # 3. Feature flags
