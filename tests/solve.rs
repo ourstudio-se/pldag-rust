@@ -1129,7 +1129,7 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 2));
         let atleast_node = dag.set_atleast(vec!["x", "x", "x"], 3);
 
-        let mut objective = HashMap::<&str, f64>::new();
+        let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert(&atleast_node, (1, 1));
 
@@ -1192,12 +1192,9 @@ mod glpk_tests {
     fn test_common_dag_with_xor_conjunction() {
         let mut dag = Pldag::new();
         dag.set_primitives(vec!["s1", "s2", "f1", "f2"], (0, 1));
-        let sizes = dag.set_xor(vec!["s1", "s2"]);
-        let fabrics = dag.set_xor(vec!["f1", "f2"]);
-
-        let root = dag.set_and(vec![sizes, fabrics]);
-
-        println!("root: {}", root);
+        let s = dag.set_xor(vec!["s1", "s2"]);
+        let f = dag.set_xor(vec!["f1", "f2"]);
+        let root = dag.set_and(vec![s, f]);
         let solution = dag.solve(
             vec![],
             vec![HashMap::from([
@@ -1209,22 +1206,36 @@ mod glpk_tests {
             HashMap::from([(root.as_str(), (1, 1))]),
             true,
         );
-        let asd = &solution[0];
-        match asd {
-            None => {}
-            Some(assignments) => {
-                for (id, bound) in assignments {
-                    println!("{}: {}", id, bound.0)
-                }
-            }
-        }
+        let solution = &solution[0];
+        assert!(solution.is_some(), "Expected a feasible solution");
+        let solution_unwrapped = solution.as_ref().unwrap();
+        assert_eq!(
+            *solution_unwrapped.get("s1").unwrap(),
+            (1, 1),
+            "s1 should be selected"
+        );
+        assert_eq!(
+            *solution_unwrapped.get("s2").unwrap(),
+            (0, 0),
+            "s2 should not be selected"
+        );
+        assert_eq!(
+            *solution_unwrapped.get("f1").unwrap(),
+            (0, 0),
+            "f1 should not be selected"
+        );
+        assert_eq!(
+            *solution_unwrapped.get("f2").unwrap(),
+            (1, 1),
+            "f2 should be selected"
+        );
     }
 
     #[test]
     fn test_atleast_with_no_variables_will_result_to_false() {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
-        let atleast = dag.set_atleast(vec![], 1);
+        let atleast = dag.set_atleast(Vec::<&str>::new(), 1);
         let equiv = dag.set_equiv("x", atleast.as_str());
         let solutions = dag.solve(
             vec![],
@@ -1250,9 +1261,15 @@ mod glpk_tests {
             true,
         );
         let assignments = solutions[0].as_ref().unwrap();
-        for (id, bound) in assignments {
-            println!("{}: {}", id, bound.0)
-        }
+        let selected_vars: Vec<&&str> = ["a", "b", "c"]
+            .iter()
+            .filter(|&var| assignments.get(*var).unwrap().0 == 1)
+            .collect();
+        assert_eq!(
+            selected_vars.len(),
+            1,
+            "Exactly one variable should be selected"
+        );
     }
 
     #[test]
@@ -1349,8 +1366,7 @@ mod glpk_tests {
     fn test_solve_when_composites_are_tautologies_or_contradictions() {
         let mut model = Pldag::new();
         let sand = model.set_and(Vec::<String>::new());
-        let sor = model.set_gelineq(HashMap::new(), -5);
-        println!("sand: {}, sor: {}", sand, sor);
+        let sor = model.set_gelineq(Vec::<(&str, i32)>::new(), -5);
         let assume = HashMap::new();
         let solutions = model.solve(
             vec![],

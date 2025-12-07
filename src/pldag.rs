@@ -51,7 +51,7 @@ fn create_hash(data: &Vec<(String, i32)>, num: i32) -> u64 {
 /// # Returns
 /// A new bound (min1 + min2, max1 + max2)
 fn bound_add(b1: Bound, b2: Bound) -> Bound {
-    return (b1.0 + b2.0, b1.1 + b2.1);
+    (b1.0 + b2.0, b1.1 + b2.1)
 }
 
 /// Multiplies a bound by a scalar coefficient.
@@ -67,9 +67,9 @@ fn bound_add(b1: Bound, b2: Bound) -> Bound {
 /// A new bound with the multiplication applied
 fn bound_multiply(k: i32, b: Bound) -> Bound {
     if k < 0 {
-        return (k * b.1, k * b.0);
+        (k * b.1, k * b.0)
     } else {
-        return (k * b.0, k * b.1);
+        (k * b.0, k * b.1)
     }
 }
 
@@ -152,14 +152,16 @@ impl DenseIntegerMatrix {
     ///
     /// # Panics
     /// May panic if the vector length doesn't match the matrix column count
-    pub fn dot_product(&self, vector: &Vec<i32>) -> Vec<i32> {
-        let mut result = vec![0; self.shape.0];
-        for i in 0..self.shape.0 {
-            for j in 0..self.shape.1 {
-                result[i] += self.data[i][j] * vector[j];
-            }
-        }
-        result
+    pub fn dot_product(&self, vector: &[i32]) -> Vec<i32> {
+        self.data
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(vector.iter())
+                    .map(|(a, b)| a * b)
+                    .sum()
+            })
+            .collect()
     }
 }
 
@@ -639,14 +641,12 @@ impl Pldag {
                         }
 
                         // Calculate result
-                        let multiplied: Vec<(i32, i32)> = coefficients
-                            .iter()
-                            .map(|(input_id, coef)| {
-                                bound_multiply(*coef, *coef_vals.get(input_id).unwrap())
-                            })
-                            .collect();
-
-                        let summed = multiplied.iter().fold((0, 0), |acc, b| bound_add(acc, *b));
+                        // Instead of allocating a Vec, accumulate directly.
+                        let summed = coefficients.iter().fold((0, 0), |acc, (input_id, coef)| {
+                            let bound = coef_vals.get(input_id).unwrap();
+                            let prod = bound_multiply(*coef, *bound);
+                            bound_add(acc, prod)
+                        });
                         let biased = bound_add(summed, (bias, bias));
 
                         results.insert(
@@ -695,6 +695,7 @@ impl Pldag {
     /// Only available when the crate is compiled with `--features glpk`
     ///
     /// # Arguments
+    /// * `roots` - Vector of root node IDs to define the sub-DAG for solving. If empty, uses the entire DAG.
     /// * `objectives` - Vector of ID to value mapping representing different objective functions to solve
     /// * `assume` - Fixed variable assignments to apply before solving
     /// * `maximize` - If true, maximizes the objective; if false, minimizes it
@@ -990,10 +991,10 @@ impl Pldag {
             column_bounds: column_names_map
                 .keys()
                 .map(|key| {
-                    (match sub_dag.get(key) {
+                    match sub_dag.get(key) {
                         Some(Node::Primitive(bound)) => *bound,
                         _ => (0, 1),
-                    })
+                    }
                 })
                 .collect(),
         };
@@ -1035,7 +1036,7 @@ impl Pldag {
     }
 
     /// Retrieves all primitive variables from the given PL-DAG roots.
-    /// ///
+    ///
     /// # Returns
     /// An `IndexMap` mapping variable IDs to their corresponding `Bound` objects
     pub fn get_primitives(&self, roots: Vec<String>) -> IndexMap<String, Bound> {
@@ -1053,7 +1054,7 @@ impl Pldag {
     }
 
     /// Retrieves all composite constraints from the PL-DAG.
-    /// ///
+    ///
     /// # Returns
     /// An `IndexMap` mapping constraint IDs to their corresponding `Constraint` objects
     pub fn get_composites(&self, roots: Vec<String>) -> IndexMap<String, Constraint> {
@@ -1071,7 +1072,7 @@ impl Pldag {
     }
 
     /// Retrieves a node by its ID.
-    /// ///
+    ///
     /// # Arguments
     /// * `id` - The unique identifier of the node to retrieve
     /// # Returns
@@ -1098,12 +1099,15 @@ impl Pldag {
     /// Duplicate IDs are automatically filtered out.
     ///
     /// # Arguments
-    /// * `ids` - Vector of unique identifiers for the variables
+    /// * `ids` - Iterator of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
-    pub fn set_primitives(&mut self, ids: Vec<&str>, bound: Bound) {
-        let unique_ids: IndexSet<_> = ids.into_iter().collect();
+    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound)
+    where
+        K: ToString,
+    {
+        let unique_ids: IndexSet<String> = ids.into_iter().map(|k| k.to_string()).collect();
         for id in unique_ids {
-            self.set_primitive(id, bound);
+            self.set_primitive(&id, bound);
         }
     }
 
@@ -1113,16 +1117,19 @@ impl Pldag {
     /// The constraint is automatically assigned a unique ID based on its content.
     ///
     /// # Arguments
-    /// * `coefficient_variables` - Vector of (variable_id, coefficient) pairs
+    /// * `coefficient_variables` - Iterator of (variable_id, coefficient) pairs
     /// * `bias` - Constant bias term
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_gelineq<'a>(
+    pub fn set_gelineq<K>(
         &mut self,
-        coefficient_variables: impl IntoIterator<Item = (&'a str, i32)>,
+        coefficient_variables: impl IntoIterator<Item = (K, i32)>,
         bias: i32,
-    ) -> ID {
+    ) -> ID
+    where
+        K: ToString,
+    {
         // Ensure coefficients have unique keys by summing duplicate values
         let mut unique_coefficients: IndexMap<ID, i32> = IndexMap::new();
         for (key, value) in coefficient_variables {
@@ -1152,26 +1159,36 @@ impl Pldag {
     /// Creates an "at least" constraint: sum(variables) >= value.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to sum
+    /// * `references` - Iterator of variable IDs to sum
     /// * `value` - Minimum required sum
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atleast<'a>(
+    pub fn set_atleast<K>(
         &mut self,
-        references: impl IntoIterator<Item = &'a str>,
+        references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> ID {
+    ) -> ID
+    where
+        K: ToString,
+    {
         self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value)
     }
 
-    pub fn set_atleast_ref<'a>(
+    pub fn set_atleast_ref<K, V>(
         &mut self,
-        references: impl IntoIterator<Item = &'a str>,
-        value: &str,
-    ) -> ID {
+        references: impl IntoIterator<Item = K>,
+        value: V,
+    ) -> ID
+    where
+        K: ToString,
+        V: ToString,
+    {
         self.set_gelineq(
-            references.into_iter().map(|x| (x, 1)).chain([(value, -1)]),
+            references
+                .into_iter()
+                .map(|x| (x.to_string(), 1))
+                .chain([(value.to_string(), -1)]),
             0,
         )
     }
@@ -1179,26 +1196,36 @@ impl Pldag {
     /// Creates an "at most" constraint: sum(variables) <= value.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to sum
+    /// * `references` - Iterator of variable IDs to sum
     /// * `value` - Maximum allowed sum
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_atmost<'a>(
+    pub fn set_atmost<K>(
         &mut self,
-        references: impl IntoIterator<Item = &'a str>,
+        references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> ID {
+    ) -> ID
+    where
+        K: ToString,
+    {
         self.set_gelineq(references.into_iter().map(|x| (x, -1)), value)
     }
 
-    pub fn set_atmost_ref<'a>(
+    pub fn set_atmost_ref<K, V>(
         &mut self,
-        references: impl IntoIterator<Item = &'a str>,
-        value: &str,
-    ) -> ID {
+        references: impl IntoIterator<Item = K>,
+        value: V,
+    ) -> ID
+    where
+        K: ToString,
+        V: ToString,
+    {
         self.set_gelineq(
-            references.into_iter().map(|x| (x, -1)).chain([(value, 1)]),
+            references
+                .into_iter()
+                .map(|x| (x.to_string(), -1))
+                .chain([(value.to_string(), 1)]),
             0,
         )
     }
@@ -1208,27 +1235,36 @@ impl Pldag {
     /// Implemented as the conjunction of "at least" and "at most" constraints.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to sum
+    /// * `references` - Iterator of variable IDs to sum (must be clonable)
     /// * `value` - Required exact sum
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_equal<'a>(
+    pub fn set_equal<K, I>(
         &mut self,
-        references: impl IntoIterator<Item = &'a str> + Clone,
+        references: I,
         value: i32,
-    ) -> ID {
+    ) -> ID
+    where
+        K: ToString,
+        I: IntoIterator<Item = K> + Clone,
+    {
         let ub = self.set_atleast(references.clone(), value);
         let lb = self.set_atmost(references, value);
         self.set_and(vec![ub, lb])
     }
 
-    pub fn set_equal_ref<'a>(
+    pub fn set_equal_ref<K, V, I>(
         &mut self,
-        references: impl IntoIterator<Item = &'a str> + Clone,
-        value: &str,
-    ) -> ID {
-        let ub = self.set_atleast_ref(references.clone(), value);
+        references: I,
+        value: V,
+    ) -> ID
+    where
+        K: ToString,
+        V: ToString,
+        I: IntoIterator<Item = K> + Clone,
+    {
+        let ub = self.set_atleast_ref(references.clone(), value.to_string());
         let lb = self.set_atmost_ref(references, value);
         self.set_and(vec![ub, lb])
     }
@@ -1239,16 +1275,16 @@ impl Pldag {
     /// Implemented as: sum(variables) >= count(variables).
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to AND together
+    /// * `references` - Iterator of variable IDs to AND together
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_and<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
+            references.into_iter().map(|x| x.to_string()).collect();
         let length = unique_references.len();
         self.set_atleast(unique_references.iter().map(|x| x.as_str()), length as i32)
     }
@@ -1259,16 +1295,16 @@ impl Pldag {
     /// Implemented as: sum(variables) >= 1.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to OR together
+    /// * `references` - Iterator of variable IDs to OR together
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_or<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
+            references.into_iter().map(|x| x.to_string()).collect();
         self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1)
     }
 
@@ -1278,16 +1314,16 @@ impl Pldag {
     /// Implemented as: sum(variables) <= count(variables) - 1.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to NAND together
+    /// * `references` - Iterator of variable IDs to NAND together
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_nand<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
+            references.into_iter().map(|x| x.to_string()).collect();
         let length = unique_references.len();
         self.set_atmost(
             unique_references.iter().map(|x| x.as_str()),
@@ -1301,16 +1337,16 @@ impl Pldag {
     /// Implemented as: sum(variables) <= 0.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to NOR together
+    /// * `references` - Iterator of variable IDs to NOR together
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_nor<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
+            references.into_iter().map(|x| x.to_string()).collect();
         self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
     }
 
@@ -1320,16 +1356,16 @@ impl Pldag {
     /// Functionally equivalent to NOR. Implemented as: sum(variables) <= 0.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to negate
+    /// * `references` - Iterator of variable IDs to negate
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_not<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
+            references.into_iter().map(|x| x.to_string()).collect();
         self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
     }
 
@@ -1339,17 +1375,17 @@ impl Pldag {
     /// Implemented as the conjunction of OR and "at most 1" constraints.
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to XOR together
+    /// * `references` - Iterator of variable IDs to XOR together
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_xor<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
-        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()).collect());
+            references.into_iter().map(|x| x.to_string()).collect();
+        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()));
         let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1);
         self.set_and(vec![atleast, atmost])
     }
@@ -1360,16 +1396,16 @@ impl Pldag {
     /// (including zero). Implemented as: (sum >= 2) OR (sum <= 0).
     ///
     /// # Arguments
-    /// * `references` - Vector of variable IDs to XNOR together
+    /// * `references` - Iterator of variable IDs to XNOR together
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_xnor<T>(&mut self, references: Vec<T>) -> ID
+    pub fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
-        T: Into<String>,
+        K: ToString,
     {
         let unique_references: IndexSet<String> =
-            references.into_iter().map(|x| x.into()).collect();
+            references.into_iter().map(|x| x.to_string()).collect();
         let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2);
         let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0);
         self.set_or(vec![atleast, atmost])
@@ -1386,16 +1422,13 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_imply<T, U>(&mut self, condition: T, consequence: U) -> ID
+    pub fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> ID
     where
-        T: Into<String>,
-        U: Into<String>,
+        C: ToString,
+        Q: ToString,
     {
-        let not_condition = self.set_not(vec![condition.into()]);
-        println!("not_condition ID: {}", not_condition);
-        let id = self.set_or(vec![not_condition, consequence.into()]);
-        println!("imply ID: {}", id);
-        id
+        let not_condition = self.set_not(vec![condition.to_string()]);
+        self.set_or(vec![not_condition, consequence.to_string()])
     }
 
     /// Creates a logical EQUIVALENCE constraint: lhs <-> rhs.
@@ -1409,14 +1442,14 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint OR None if it failed to create the constraint
-    pub fn set_equiv<T, U>(&mut self, lhs: T, rhs: U) -> ID
+    pub fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> ID
     where
-        T: Into<String> + Clone,
-        U: Into<String> + Clone,
+        L: ToString,
+        R: ToString,
     {
         // Convert to strings first to avoid type mismatches
-        let lhs_str: String = lhs.into();
-        let rhs_str: String = rhs.into();
+        let lhs_str = lhs.to_string();
+        let rhs_str = rhs.to_string();
 
         let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()]);
         let imply_rl = self.set_not(vec![rhs_str, lhs_str]);
