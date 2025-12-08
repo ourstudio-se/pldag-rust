@@ -22,6 +22,11 @@ pub enum PldagError {
         got_bound: (i32, i32),
         expected_bound: (i32, i32),
     },
+
+    // Max iterations exceeded during tightening
+    MaxIterationsExceeded {
+        max_iters: usize,
+    },
 }
 
 impl fmt::Display for PldagError {
@@ -43,6 +48,9 @@ impl fmt::Display for PldagError {
                     "Node '{}' out of bounds: got {:?}, expected {:?}",
                     node_id, got_bound, expected_bound
                 )
+            }
+            PldagError::MaxIterationsExceeded { max_iters } => {
+                write!(f, "Max iterations exceeded during tightening: {}", max_iters)
             }
         }
     }

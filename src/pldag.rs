@@ -74,6 +74,107 @@ fn bound_multiply(k: i32, b: Bound) -> Bound {
     }
 }
 
+/// Integer floor division that is correct for negative numbers.
+fn div_floor(a: i32, b: i32) -> i32 {
+    assert!(b != 0);
+    let (q, r) = (a / b, a % b);
+    if r != 0 && (r > 0) != (b > 0) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+/// Integer ceil division that is correct for negative numbers.
+fn div_ceil(a: i32, b: i32) -> i32 {
+    assert!(b != 0);
+    let (q, r) = (a / b, a % b);
+    if r != 0 && (r > 0) == (b > 0) {
+        q + 1
+    } else {
+        q
+    }
+}
+
+/// Intersect two bounds (component-wise).
+fn intersect_bounds(a: Bound, b: Bound) -> Bound {
+    (a.0.max(b.0), a.1.min(b.1))
+}
+
+/// Tighten variable bounds assuming a constraint of the form:
+///
+///   sum(a_i * x_i) + bias >= 0
+///
+/// is **TRUE**.
+///
+/// This uses the ">= b" bound tightening logic on:
+///
+///   sum(a_i * x_i) >= -bias_min
+///
+/// where bias_min = bias.0.
+///
+/// Returns true if any bound was changed.
+fn tighten_constraint_true(constraint: &Constraint, values: &mut IndexMap<String, Bound>) -> bool {
+    let mut changed = false;
+
+    // Transform: sum(a_i * x_i) + bias >= 0  ->  sum(a_i * x_i) >= -bias_min
+    let b = -constraint.bias.0;
+    let coeffs = &constraint.coefficients;
+
+    for (var_k, a_k) in coeffs.iter() {
+        if *a_k == 0 {
+            continue;
+        }
+
+        // Get current bound for x_k
+        let (mut l_k, mut u_k) = values
+            .get(var_k)
+            .cloned()
+            .unwrap_or((i32::MIN / 2, i32::MAX / 2));
+
+        // Compute best help from other variables
+        let mut big_b = 0i32;
+        for (var_i, a_i) in coeffs.iter() {
+            if var_i == var_k {
+                continue;
+            }
+            let (l_i, u_i) = values
+                .get(var_i)
+                .cloned()
+                .unwrap_or((i32::MIN / 2, i32::MAX / 2));
+
+            if *a_i > 0 {
+                big_b += a_i * u_i;
+            } else if *a_i < 0 {
+                big_b += a_i * l_i;
+            }
+        }
+
+        // a_k * x_k + B >= b   ->   solve for x_k
+        if *a_k > 0 {
+            let num = b - big_b;
+            let new_l = div_ceil(num, *a_k);
+            if new_l > l_k {
+                l_k = new_l;
+                changed = true;
+            }
+        } else {
+            // a_k < 0
+            let num = b - big_b;
+            let new_u = div_floor(num, *a_k);
+            if new_u < u_k {
+                u_k = new_u;
+                changed = true;
+            }
+        }
+
+        // Write back updated bound for x_k
+        values.insert(var_k.clone(), (l_k, u_k));
+    }
+
+    changed
+}
+
 /// Sparse representation of an integer matrix.
 ///
 /// Stores only non-zero elements using coordinate format (COO):
@@ -555,6 +656,99 @@ impl Pldag {
 
     pub fn new_custom(storage: Box<dyn NodeStoreTrait>) -> Pldag {
         Pldag { storage }
+    }
+
+    /// Full tightening over the DAG given initial assumptions.
+    ///
+    /// - `dag`: mapping from node name to Node (Primitive / Composite)
+    /// - `assumptions`: mapping from node name to assumed bound,
+    ///    e.g. "A" -> (1,1) means boolean node A is TRUE.
+    ///
+    /// Returns an IndexMap of final bounds for all nodes (primitives + composite booleans).
+    pub fn tighten(
+        dag: &HashMap<String, Node>,
+        assumptions: &HashMap<String, Bound>,
+    ) -> Result<IndexMap<String, Bound>> {
+        // 1. Initialize bounds for all nodes.
+        //
+        // - Primitive: use its bound.
+        // - Composite: treat as boolean in [0,1] if not in assumptions.
+        let mut values: IndexMap<String, Bound> = IndexMap::new();
+        for (name, node) in dag.iter() {
+            let initial = match node {
+                Node::Primitive(b) => *b,
+                Node::Composite(_) => (0, 1), // boolean: unknown in [0,1]
+            };
+            values.insert(name.clone(), initial);
+        }
+
+        // 2. Apply assumptions by intersecting bounds.
+        for (name, assumed) in assumptions.iter() {
+            let entry = values.entry(name.clone()).or_insert(*assumed);
+            *entry = intersect_bounds(*entry, *assumed);
+        }
+
+        // 3. Fixed-point iteration: propagate until no more changes.
+        let max_iters = 100;
+        let mut iter = 0;
+
+        loop {
+            iter += 1;
+            if iter > max_iters {
+                return Err(PldagError::MaxIterationsExceeded { max_iters });
+            }
+
+            let mut changed = false;
+
+            // For each composite node:
+            //  1) tighten its boolean bound using current variable bounds
+            //  2) if boolean is forced to TRUE or FALSE, tighten variable bounds.
+            for (name, node) in dag.iter() {
+                let constraint = match node {
+                    Node::Composite(c) => c,
+                    Node::Primitive(_) => continue,
+                };
+
+                // Current boolean bound of this constraint node
+                let bool_bound = values.get(name).cloned().unwrap_or((0, 1));
+                let old_bool_bound = bool_bound;
+
+                // (a) Evaluate constraint and intersect with current boolean bound.
+                //
+                // evaluate() returns:
+                //   (1,1) => definitely true
+                //   (0,0) => definitely false
+                //   (0,1) => unknown
+                let eval = constraint.evaluate(&values);
+                let new_bool_bound = intersect_bounds(bool_bound, eval);
+                if new_bool_bound != old_bool_bound {
+                    values.insert(name.clone(), new_bool_bound);
+                    changed = true;
+                }
+
+                // (b) If now forced TRUE, propagate on the constraint.
+                let (lb, ub) = new_bool_bound;
+                if lb == 1 && ub == 1 {
+                    // Constraint is TRUE: sum(a_i * x_i) + bias >= 0
+                    if tighten_constraint_true(constraint, &mut values) {
+                        changed = true;
+                    }
+                } else if lb == 0 && ub == 0 {
+                    // Constraint is FALSE:
+                    // use the negated constraint, which is also of the form >= 0.
+                    let neg = constraint.negate();
+                    if tighten_constraint_true(&neg, &mut values) {
+                        changed = true;
+                    }
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        Ok(values)
     }
 
     /// Propagates bounds through the DAG bottom-up.
@@ -1562,6 +1756,23 @@ mod tests {
         }
     }
 
+    /// Helper: create a primitive node with a simple [min, max] bound.
+    fn prim(min: i32, max: i32) -> Node {
+        Node::Primitive((min, max))
+    }
+
+    /// Helper: build a constraint: sum(coeffs) + bias >= 0
+    fn cons(coeffs: Vec<(&str, i32)>, bias: i32) -> Node {
+        let coefficients = coeffs
+            .into_iter()
+            .map(|(name, c)| (name.to_string(), c))
+            .collect::<Vec<_>>();
+        Node::Composite(Constraint {
+            coefficients,
+            bias: (bias, bias),
+        })
+    }
+
     #[test]
     fn test_propagate() {
         let mut model = Pldag::new();
@@ -2046,5 +2257,155 @@ mod tests {
         let root = model.set_and(vec!["p", "q", "r"]);
         let result = model.to_sparse_polyhedron_default(vec![root]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+    }
+
+    #[test]
+    fn binary_cardinality_all_forced_to_one_when_true() {
+        // x, y, z in [0,1]
+        // A: x + y + z - 3 >= 0  <=>  x + y + z >= 3
+        // A is assumed TRUE → x = y = z = 1
+
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("z".into(), prim(0, 1));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1), ("z", 1)], -3));
+
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (1, 1));
+
+        let values = Pldag::tighten(&dag, &assumptions).unwrap();
+
+        assert_eq!(values.get("x"), Some(&(1, 1)));
+        assert_eq!(values.get("y"), Some(&(1, 1)));
+        assert_eq!(values.get("z"), Some(&(1, 1)));
+        assert_eq!(values.get("A"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn binary_cardinality_false_does_not_tighten() {
+        // x, y, z in [0,1]
+        // A: x + y + z >= 3
+        // A is FALSE → x + y + z <= 2
+        // With [0,1] for all, this does NOT force any individual variable.
+
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("z".into(), prim(0, 1));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1), ("z", 1)], -3));
+
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (0, 0)); // A forced FALSE
+
+        let values = Pldag::tighten(&dag, &assumptions).unwrap();
+
+        assert_eq!(values.get("x"), Some(&(0, 1)));
+        assert_eq!(values.get("y"), Some(&(0, 1)));
+        assert_eq!(values.get("z"), Some(&(0, 1)));
+        assert_eq!(values.get("A"), Some(&(0, 0)));
+    }
+
+    #[test]
+    fn chained_constraints_do_not_tighten_in_this_case() {
+        // x, y, z ∈ [0,3]
+        // A: x + y - 3 >= 0  <=>  x + y >= 3
+        // B: y + z - 3 >= 0  <=>  y + z >= 3
+        // Assume A = TRUE and B = TRUE.
+        //
+        // Interval reasoning alone cannot tighten x, y, or z here.
+
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 3));
+        dag.insert("y".into(), prim(0, 3));
+        dag.insert("z".into(), prim(0, 3));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1)], -3));
+        dag.insert("B".into(), cons(vec![("y", 1), ("z", 1)], -3));
+
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (1, 1));
+        assumptions.insert("B".into(), (1, 1));
+
+        let values = Pldag::tighten(&dag, &assumptions).unwrap();
+
+        let x = values.get("x").unwrap();
+        let y = values.get("y").unwrap();
+        let z = values.get("z").unwrap();
+
+        // No tightening should happen on x, y, z with this propagation strength.
+        assert_eq!(*x, (0, 3));
+        assert_eq!(*y, (0, 3));
+        assert_eq!(*z, (0, 3));
+
+        // A and B must be true.
+        assert_eq!(values.get("A"), Some(&(1, 1)));
+        assert_eq!(values.get("B"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn composite_as_boolean_in_another_constraint() {
+        // A: x + y - 3 >= 0   (x + y >= 3), boolean node A
+        // D: 5*A + z - 6 >= 0   (5*A + z >= 6)
+        //
+        // x,y,z ∈ [0,5]
+        // Assume D is TRUE, but A is not explicitly assumed.
+        //
+        // From D:
+        //  - If A were 0, then z >= 6 impossible (since z ≤ 5)
+        //  -> so A must be 1
+        //  -> D being TRUE forces A TRUE, then A TRUE forces x + y >= 3.
+
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 5));
+        dag.insert("y".into(), prim(0, 5));
+        dag.insert("z".into(), prim(0, 5));
+
+        // A: x + y - 3 >= 0
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1)], -3));
+
+        // D: 5*A + z - 6 >= 0  (A is treated as variable in [0,1])
+        dag.insert("D".into(), cons(vec![("A", 5), ("z", 1)], -6));
+
+        let mut assumptions = HashMap::new();
+        assumptions.insert("D".into(), (1, 1)); // D must be true
+
+        let values = Pldag::tighten(&dag, &assumptions).unwrap();
+
+        let a = values.get("A").unwrap();
+        let z = values.get("z").unwrap();
+        let x = values.get("x").unwrap();
+        let y = values.get("y").unwrap();
+
+        // D true should force A = 1 (because with A=0, z >= 6 impossible)
+        assert_eq!(*a, (1, 1), "expected A to be forced to TRUE by D");
+
+        // With A = 1, D becomes: 5*1 + z - 6 >= 0 => z >= 1
+        assert!(z.0 >= 1, "expected z lower bound >= 1, got {:?}", z);
+
+        // x and y are not tightened by pure interval propagation
+        assert_eq!(*x, (0, 5));
+        assert_eq!(*y, (0, 5));
+    }
+
+    #[test]
+    fn test_tighten_bounds_on_an_xor() {
+        // A = B + C >= 2
+        // B = x + y + z >= 1
+        // C = -x -y -z >= -1
+
+        // Assume A is TRUE, and x = (1, 1) then y and z must be (0, 0)
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("z".into(), prim(0, 1));
+        dag.insert("B".into(), cons(vec![("x", 1), ("y", 1), ("z", 1)], -1));
+        dag.insert("C".into(), cons(vec![("x", -1), ("y", -1), ("z", -1)], 1));
+        dag.insert("A".into(), cons(vec![("B", 1), ("C", 1)], -2));
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (1, 1));
+        assumptions.insert("x".into(), (1, 1));
+        let values = Pldag::tighten(&dag, &assumptions).unwrap();
+        assert_eq!(values.get("y"), Some(&(0, 0)));
+        assert_eq!(values.get("z"), Some(&(0, 0)));
     }
 }
