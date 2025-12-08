@@ -62,7 +62,7 @@ Enabling the `glpk` feature links to the GNU Linear Programming Kit (GLPK). If y
 fn propagate<K>(
     &self,
     assignment: impl IntoIterator<Item = (K, Bound)>
-) -> Assignment
+) -> Result<Assignment>
 where K: ToString;
 ```
 
@@ -71,7 +71,7 @@ where K: ToString;
 #### `propagate_default`
 
 ```rust
-fn propagate_default(&self) -> Assignment;
+fn propagate_default(&self) -> Result<Assignment>;
 ```
 
 *Convenience method that propagates using default bounds of all primitive variables.*
@@ -207,7 +207,7 @@ pldag.set_primitive("z", (0, 1));
 let root = pldag.set_or(vec!["x", "y", "z"]);
 
 // Validate a combination
-let validated = pldag.propagate_default();
+let validated = pldag.propagate_default().unwrap();
 println!("root bound = {:?}", validated[&root]);
 ```
 

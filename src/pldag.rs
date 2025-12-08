@@ -1,3 +1,4 @@
+use crate::error::{PldagError, Result};
 use crate::storage::{InMemoryStore, NodeStore, NodeStoreTrait};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
@@ -566,18 +567,23 @@ impl Pldag {
     ///
     /// # Returns
     /// Complete assignment including bounds for all reachable nodes
-    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>) -> Assignment
+    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>) -> Result<Assignment>
     where
         K: ToString,
     {
-        let mut results = assignments
+        // Convert assignments into IndexMap<String, Bound>
+        let assignments_map: IndexMap<String, Bound> = assignments
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
-            .collect::<Assignment>();
+            .collect();
+
+        // Initialize results with the provided assignments
+        let mut results: IndexMap<String, Bound> = IndexMap::new();
 
         // Extract all keys from the initial assignments
-        let mut queue: Vec<String> = results.keys().cloned().collect();
+        let mut queue: Vec<String> = assignments_map.keys().cloned().collect();
 
+        // Keep track of visited nodes to avoid reprocessing1
         let mut visited = HashSet::new();
         while queue.len() > 0 {
             let mut next_batch: Vec<String> = Vec::new();
@@ -590,22 +596,35 @@ impl Pldag {
                     continue; // Already processed this node
                 }
 
-                if results.contains_key(&node_id) {
-                    // Mark as visited and processed
-                    visited.insert(node_id.clone());
-                    processed_this_batch.push(node_id.clone());
-                    continue; // Already have result for this node
-                }
-
                 let node = match batch_incoming.get(&node_id) {
                     Some(n) => n,
-                    None => panic!("Node id {} not found in storage", node_id),
+                    None => {
+                        return Err(PldagError::NodeNotFound {
+                            node_id: node_id.clone(),
+                        })
+                    }
                 };
 
                 match node {
                     Node::Primitive(primitive) => {
-                        // Primitive nodes already have their bounds set
-                        results.insert(node_id.to_string(), *primitive);
+                        // If this node is in the initial assignments, use that value
+                        if let Some(bound) = assignments_map.get(&node_id) {
+
+                            // However, if the assigned bound is looser than the primitive's inherent bound,
+                            // we return an error since it is not allowed.
+                            if bound.0 < primitive.0 || bound.1 > primitive.1 {
+                                return Err(PldagError::NodeOutOfBounds {
+                                    node_id: node_id.clone(),
+                                    got_bound: *bound,
+                                    expected_bound: *primitive,
+                                });
+                            }
+
+                            results.insert(node_id.to_string(), *bound);
+                        } else {
+                            // Otherwise, use the primitive's inherent bound
+                            results.insert(node_id.to_string(), *primitive);
+                        }
                         visited.insert(node_id.clone());
                         processed_this_batch.push(node_id.clone());
                     }
@@ -674,7 +693,7 @@ impl Pldag {
             }
         }
 
-        results
+        Ok(results)
     }
 
     /// Propagates bounds using default primitive variable bounds.
@@ -684,7 +703,7 @@ impl Pldag {
     ///
     /// # Returns
     /// Complete assignments with bounds for all nodes
-    pub fn propagate_default(&self) -> Assignment {
+    pub fn propagate_default(&self) -> Result<Assignment> {
         let primitives = self.get_primitives(vec![]);
         self.propagate(primitives)
     }
@@ -1508,7 +1527,7 @@ mod tests {
                 .collect::<IndexMap<&str, Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.propagate(interp);
+            let prop = model.propagate(interp).unwrap();
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -1533,7 +1552,7 @@ mod tests {
         model.set_primitive("y", (0, 1));
         let root = model.set_and(vec!["x", "y"]);
 
-        let result = model.propagate_default();
+        let result = model.propagate_default().unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get(&root).unwrap(), &(0, 1));
@@ -1541,40 +1560,40 @@ mod tests {
         let mut assignments = IndexMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        let result = model.propagate(assignments);
+        let result = model.propagate(assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
-        // let mut model = Pldag::new();
-        // model.set_primitive("x", (0, 1));
-        // model.set_primitive("y", (0, 1));
-        // model.set_primitive("z", (0, 1));
-        // let root = model.set_xor(vec!["x", "y", "z".into()]);
-        // let result = model.propagate_default();
-        // assert_eq!(result.get("x").unwrap(), &(0, 1));
-        // assert_eq!(result.get("y").unwrap(), &(0, 1));
-        // assert_eq!(result.get("z").unwrap(), &(0, 1));
-        // assert_eq!(result.get(&root).unwrap(), &(0, 1));
+        let mut model = Pldag::new();
+        model.set_primitive("x", (0, 1));
+        model.set_primitive("y", (0, 1));
+        model.set_primitive("z", (0, 1));
+        let root = model.set_xor(vec!["x", "y", "z".into()]);
+        let result = model.propagate_default().unwrap();
+        assert_eq!(result.get("x").unwrap(), &(0, 1));
+        assert_eq!(result.get("y").unwrap(), &(0, 1));
+        assert_eq!(result.get("z").unwrap(), &(0, 1));
+        assert_eq!(result.get(&root).unwrap(), &(0, 1));
 
-        // let mut assignments = IndexMap::new();
-        // assignments.insert("x", (1, 1));
-        // assignments.insert("y", (1, 1));
-        // assignments.insert("z", (1, 1));
-        // let result = model.propagate(assignments);
-        // assert_eq!(result.get(&root).unwrap(), &(0, 0));
+        let mut assignments = IndexMap::new();
+        assignments.insert("x", (1, 1));
+        assignments.insert("y", (1, 1));
+        assignments.insert("z", (1, 1));
+        let result = model.propagate(assignments).unwrap();
+        assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
-        // let mut assignments = IndexMap::new();
-        // assignments.insert("x", (0, 1));
-        // assignments.insert("y", (1, 1));
-        // assignments.insert("z", (1, 1));
-        // let result = model.propagate(assignments);
-        // assert_eq!(result.get(&root).unwrap(), &(0, 0));
+        let mut assignments = IndexMap::new();
+        assignments.insert("x", (0, 1));
+        assignments.insert("y", (1, 1));
+        assignments.insert("z", (1, 1));
+        let result = model.propagate(assignments).unwrap();
+        assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
-        // let mut assignments = IndexMap::new();
-        // assignments.insert("x", (0, 0));
-        // assignments.insert("y", (1, 1));
-        // assignments.insert("z", (0, 0));
-        // let result = model.propagate(assignments);
-        // assert_eq!(result.get(&root).unwrap(), &(1, 1));
+        let mut assignments = IndexMap::new();
+        assignments.insert("x", (0, 0));
+        assignments.insert("y", (1, 1));
+        assignments.insert("z", (0, 0));
+        let result = model.propagate(assignments).unwrap();
+        assert_eq!(result.get(&root).unwrap(), &(1, 1));
     }
 
     /// XOR already covered; test the OR gate
@@ -1586,7 +1605,7 @@ mod tests {
         let or_root = model.set_or(vec!["a", "b"]);
 
         // No assignment: both inputs full [0,1], output [0,1]
-        let res = model.propagate_default();
+        let res = model.propagate_default().unwrap();
         assert_eq!(res["a"], (0, 1));
         assert_eq!(res["b"], (0, 1));
         assert_eq!(res[&or_root], (0, 1));
@@ -1594,20 +1613,20 @@ mod tests {
         // a=1 ⇒ output must be 1
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (1, 1));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (0, 0));
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&or_root], (0, 1));
     }
 
@@ -1619,20 +1638,20 @@ mod tests {
         let not_root = model.set_not(vec!["p"]);
 
         // no assignment ⇒ [0,1]
-        let res = model.propagate_default();
+        let res = model.propagate_default().unwrap();
         assert_eq!(res["p"], (0, 1));
         assert_eq!(res[&not_root], (0, 1));
 
         // p = 0 ⇒ root = 1
         let mut interp = IndexMap::<String, Bound>::new();
         interp.insert("p".into(), (0, 0));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (1, 1));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&not_root], (0, 0));
     }
 
@@ -1706,7 +1725,7 @@ mod tests {
         let v = model.set_xor(vec![w.clone(), "z".into()]);
 
         // no assignment: everything [0,1]
-        let res = model.propagate_default();
+        let res = model.propagate_default().unwrap();
         for var in &["x", "y", "z"] {
             assert_eq!(res[*var], (0, 1), "{}", var);
         }
@@ -1718,7 +1737,7 @@ mod tests {
         interp.insert("x", (1, 1));
         interp.insert("y", (1, 1));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&w], (1, 1));
         assert_eq!(res[&v], (1, 1));
 
@@ -1727,7 +1746,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (1, 1));
         interp.insert("z", (1, 1));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (1, 1));
 
@@ -1736,7 +1755,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (0, 0));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (0, 0));
     }
@@ -1753,7 +1772,7 @@ mod tests {
         let mut interp = IndexMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u".into(), (5, 5));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp).unwrap();
 
         // we expect propagate to return exactly (5,5) for "u" and compute root = negate(5)
         assert_eq!(res["u"], (5, 5));
@@ -1771,7 +1790,7 @@ mod tests {
                     .iter()
                     .map(|(k, &v)| (k.as_str(), (v, v)))
                     .collect::<IndexMap<&str, Bound>>();
-                let model_prop = model.propagate(assignments);
+                let model_prop = model.propagate(assignments).unwrap();
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -1902,27 +1921,27 @@ mod tests {
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
         let equiv = model.set_equiv("p", "q");
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 1));
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 0));
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
 
         model.set_primitive("p", (0, 0));
         model.set_primitive("q", (0, 0));
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (1, 1));
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
     }
 
@@ -1932,51 +1951,64 @@ mod tests {
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
         let equiv = model.set_imply("p", "q");
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (1, 1));
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
 
         model.set_primitive("p", (1, 1));
         model.set_primitive("q", (0, 0));
-        let propagated = model.propagate_default();
+        let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
     }
 
-    // Commented out: test_pldag_hash_function uses get_hash() which no longer exists
-    // #[test]
-    // fn test_pldag_hash_function() {
-    //     let mut model1 = Pldag::new();
-    //     model1.set_primitive("x", (0, 1));
-    //     model1.set_primitive("y", (0, 1));
-    //     model1.set_and(vec!["x", "y"]);
-    //
-    //     let mut model2 = Pldag::new();
-    //     model2.set_primitive("y", (0, 1));
-    //     model2.set_primitive("x", (0, 1));
-    //     model2.set_and(vec!["y", "x"]);
-    //
-    //     // Check that hash of model1 and model2 are the same
-    //     assert_eq!(model1.get_hash(), model2.get_hash());
-    // }
+    #[test]
+    fn test_node_out_of_bounds_error() {
+        // If we propagate a primitive with a bound that is outside its predefined range,
+        // we should get a NodeOutOfBounds error.
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        let mut interp = IndexMap::<&str, Bound>::new();
+        interp.insert("p".into(), (2, 2)); // Out of bounds
+        let result = model.propagate(interp);
+        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        let mut interp = IndexMap::<&str, Bound>::new();
+        interp.insert("p".into(), (-1, 2)); // Out of bounds
+        let result = model.propagate(interp);
+        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        let mut interp = IndexMap::<&str, Bound>::new();
+        interp.insert("p".into(), (-1, -1)); // Out of bounds
+        let result = model.propagate(interp);
+        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        let mut interp = IndexMap::<&str, Bound>::new();
+        interp.insert("p".into(), (1, 1)); // Not out of bounds
+        let result = model.propagate(interp);
+        assert!(matches!(result, Ok(_)));
+    }
 
-    // Commented out: test_sparse_polyhedron_from_pldag_hash_function uses get_hash() and undefined variable root
-    // #[test]
-    // fn test_sparse_polyhedron_from_pldag_hash_function() {
-    //     let mut model1 = Pldag::new();
-    //     model1.set_primitive("x", (0, 1));
-    //     model1.set_primitive("y", (0, 1));
-    //     model1.set_and(vec!["x", "y"]);
-    //     let polyhash1 = model1.to_sparse_polyhedron_default(vec![root.clone()]).unwrap().get_hash();
-    //
-    //     let mut model2 = Pldag::new();
-    //     model2.set_primitive("y", (0, 1));
-    //     model2.set_primitive("x", (0, 1));
-    //     model2.set_and(vec!["y", "x"]);
-    //     let polyhash2 = model2.to_sparse_polyhedron_default(vec![root.clone()]).unwrap().get_hash();
-    //     assert_eq!(polyhash1, polyhash2);
-    // }
+    #[test]
+    fn test_node_not_found_error() {
+        // If we propagate a variable that does not exist in the model,
+        // we should get a NodeNotFound error.
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        model.set_primitive("q", (0, 1));
+        model.set_and(vec!["p", "q", "r"]); // 'r' does not exist
+        let mut interp = IndexMap::<&str, Bound>::new();
+        interp.insert("q".into(), (0, 1));
+        let result = model.propagate(interp);
+        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+    }
 }
