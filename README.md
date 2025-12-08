@@ -1,6 +1,21 @@
 # Propositional Logic Directed Acyclic Graph (PL‑DAG)
 
-A **Propositional Logic Directed Acyclic Graph** (PL‑DAG) is a DAG in which every node encodes a logical operation and every leaf represents a literal. Interior nodes freely express arbitrary Boolean combinations of their predecessors—for example, an AND‑node evaluates to `true` only if *all* of its incoming nodes (or leaves) evaluate to `true`. This flexibility makes the PL‑DAG both powerful and easy to work with.
+A PL-DAG is a directed acyclic graph where each leaf defines a discrete integer domain (e.g., x ∈ [-5, 3]) and each internal node defines a linear inequality over its predecessors. The graph therefore represents a structured system of discrete constraints, allowing arbitrary compositions of integer ranges and linear relations while naturally sharing repeated sub-expressions.
+
+PL-DAGs are especially well suited for describing and solving discrete optimization problems—problems where you want to make the best possible choice under a set of rules.
+Typical examples include:
+
+- Choosing the best product configuration given technical constraints
+
+- Optimizing costs or performance while respecting limits
+
+- Selecting combinations of components that must work together
+
+- Modeling resource limits, capacities, or integer-valued decisions
+
+- Exploring what combinations of values are feasible or optimal
+
+Because the PL-DAG breaks everything into small, reusable pieces, it becomes easy to build complex models from simple parts and to solve them with efficient algorithms.
 
 ---
 
@@ -9,7 +24,7 @@ A **Propositional Logic Directed Acyclic Graph** (PL‑DAG) is a DAG in which ev
 | Area                   | What you get                                                                                                |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
 | **Modelling**          | Build Boolean/linear constraint systems in a single graph representation.                                   |
-| **Analysis**           | Fast bound‑propagation (`propagate*`) and coefficient accumulation (`propagate_coefs*`).                    |
+| **Analysis**           | Fast bound‑propagation (`propagate*`).                    |
 | **Export**             | `to_sparse_polyhedron()` generates a polyhedral ILP model ready for any solver.                             |
 | **🧩 Optional solver** | Turn on the `glpk` feature to link against [GLPK](https://www.gnu.org/software/glpk/) and solve in‑process. |
 
@@ -39,67 +54,138 @@ Enabling the `glpk` feature links to the GNU Linear Programming Kit (GLPK). If y
 
 ## Core Routines
 
-### 1. `propagate`
+### Analysis & Propagation
+
+#### `propagate`
 
 ```rust
-fn propagate(
+fn propagate<K>(
     &self,
-    assignment: impl Iterator<Item = (K, Bound)>, 
-) -> Assignment; // Assignment = IndexMap<String, Bound>
+    assignment: impl IntoIterator<Item = (K, Bound)>
+) -> Result<Assignment>
+where K: ToString;
 ```
 
 *Propagates bounds bottom‑up through the DAG and returns a map of node → bound (`(min, max)`).*
 
-### 2. `propagate_coefs`
+#### `propagate_default`
 
 ```rust
-fn propagate_coefs(
-    &self,
-    assignment: &IndexMap<&str, Bound>,
-) -> ValuedAssignment; // IndexMap<String, MultiBound>
+fn propagate_default(&self) -> Result<Assignment>;
 ```
 
-*Propagates both bounds **and** linear coefficients (`MultiBound = (Bound, VBound)`).*
+*Convenience method that propagates using default bounds of all primitive variables.*
 
-### 3. Convenience variants
+### Building the Model
+
+#### Primitive Variables
 
 ```rust
-fn propagate_default(&self) -> Assignment;
-fn propagate_coefs_default(&self) -> ValuedAssignment;
+fn set_primitive(&mut self, id: &str, bound: Bound);
+fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound)
+where K: ToString;
 ```
 
-### 4. `to_sparse_polyhedron`
+*Create primitive (leaf) variables with specified bounds. `set_primitives` creates multiple variables with the same bounds.*
+
+#### Linear Constraints
+
+```rust
+fn set_gelineq<K>(
+    &mut self,
+    coefficient_variables: impl IntoIterator<Item = (K, i32)>,
+    bias: i32
+) -> ID
+where K: ToString;
+```
+
+*Creates a general linear inequality: `sum(coeff_i * var_i) + bias >= 0`.*
+
+```rust
+fn set_atleast<K>(&mut self, references: impl IntoIterator<Item = K>, value: i32) -> ID
+where K: ToString;
+
+fn set_atmost<K>(&mut self, references: impl IntoIterator<Item = K>, value: i32) -> ID
+where K: ToString;
+
+fn set_equal<K, I>(&mut self, references: I, value: i32) -> ID
+where K: ToString, I: IntoIterator<Item = K> + Clone;
+```
+
+*`set_atleast`: Creates `sum(variables) >= value`*
+*`set_atmost`: Creates `sum(variables) <= value`*
+*`set_equal`: Creates `sum(variables) == value`*
+
+#### Logical Constraints
+
+```rust
+fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+
+fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+
+fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+
+fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+
+fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+
+fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+
+fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+where K: ToString;
+```
+
+*Standard logical operations:*
+- `set_and`: ALL variables must be true
+- `set_or`: AT LEAST ONE variable must be true
+- `set_not`: NONE of the variables can be true
+- `set_xor`: EXACTLY ONE variable must be true
+- `set_nand`: NOT ALL variables can be true
+- `set_nor`: NONE of the variables can be true
+- `set_xnor`: EVEN NUMBER of variables must be true (including zero)
+
+```rust
+fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> ID
+where C: ToString, Q: ToString;
+
+fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> ID
+where L: ToString, R: ToString;
+```
+
+*`set_imply`: Creates `condition → consequence` (implication)*
+*`set_equiv`: Creates `lhs ↔ rhs` (equivalence/biconditional)*
+
+### Export & Solving
+
+#### `to_sparse_polyhedron`
 
 ```rust
 fn to_sparse_polyhedron(
     &self,
-    double_binding: bool,
-    integer_constraints: bool,
-    fixed_constraints: bool,
+    roots: Vec<ID>,
+    double_binding: bool
 ) -> SparsePolyhedron;
 ```
 
 *Emits a sparse polyhedral representation suitable for ILP solvers (GLPK, CPLEX, Gurobi, …).*
-`SparsePolyhedron` implements `serde::Serialize`, so you can also ship it over HTTP to a remote solver service if you prefer.
+*`SparsePolyhedron` implements `serde::Serialize`, so you can ship it over HTTP to a remote solver service if you prefer.*
 
-### 5. Node management helpers
-
-```rust
-fn set_coef(&mut self, id: &str, coefficient: f64);
-fn get_coef(&self, id: &str) -> f64;
-fn get_objective(&self) -> IndexMap<String, f64>;
-fn set_primitive(&mut self, id: &str, bound: Bound);
-```
-
-### 6. `solve` (Optional GLPK Feature)
+#### `solve` (Optional GLPK Feature)
 
 ```rust
 #[cfg(feature = "glpk")]
 fn solve(
     &self,
+    roots: Vec<ID>,
     objectives: Vec<HashMap<&str, f64>>,
     assume: HashMap<&str, Bound>,
-    maximize: bool,
+    maximize: bool
 ) -> Vec<Option<Assignment>>;
 ```
 
@@ -118,19 +204,11 @@ let mut pldag = Pldag::new();
 pldag.set_primitive("x", (0, 1));
 pldag.set_primitive("y", (0, 1));
 pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
+let root = pldag.set_or(vec!["x", "y", "z"]);
 
-// 1. Validate a combination
-let validated = pldag.propagate_default();
+// Validate a combination
+let validated = pldag.propagate_default().unwrap();
 println!("root bound = {:?}", validated[&root]);
-
-// 2. Optimise with coefficients
-pldag.set_coef("x", 1.0);
-pldag.set_coef("y", 2.0);
-pldag.set_coef("z", 3.0);
-pldag.set_coef(&root, -1.0);
-let scored = pldag.propagate_coefs_default();
-println!("root value = {:?}", scored[&root].1);
 ```
 
 ### 3. Solving with GLPK (Optional Feature)
@@ -145,9 +223,9 @@ use pldag::{Pldag, Bound};
 // Build a simple problem: maximize x + 2y + 3z subject to x ∨ y ∨ z
 let mut pldag = Pldag::new();
 pldag.set_primitive("x", (0, 1));
-pldag.set_primitive("y", (0, 1)); 
+pldag.set_primitive("y", (0, 1));
 pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
+let root = pldag.set_or(vec!["x", "y", "z"]);
 
 // Set up the objective function: maximize x + 2y + 3z
 let mut objective = HashMap::new();
@@ -160,7 +238,7 @@ let mut assumptions = HashMap::new();
 assumptions.insert(&root, (1, 1)); // root must be true
 
 // Solve the optimization problem
-let solutions = pldag.solve(vec![objective], assumptions, true);
+let solutions = pldag.solve(vec![root.clone()], vec![objective], assumptions, true);
 
 if let Some(solution) = &solutions[0] {
     println!("Optimal solution found:");
@@ -183,7 +261,8 @@ This example demonstrates:
 ---
 
 ## Notes
-- <i>Please note that when a composite is either a tautology (always true) or a contradition (always false), these are automatically transformed into a primitive with fixed bounds set to (0,0) if contradition and (1,1) if tautology.</i>
+
+- All `set_*` functions accept any iterable type that can be converted to strings via the `ToString` trait, providing maximum flexibility.
 
 ## License
 
