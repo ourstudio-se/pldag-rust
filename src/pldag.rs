@@ -733,7 +733,7 @@ impl Pldag {
         };
 
         // Convert the PL-DAG to a polyhedron representation
-        let polyhedron = self.to_sparse_polyhedron(roots, true);
+        let polyhedron = self.to_sparse_polyhedron(roots, true).unwrap();
 
         // Validate assume that the bounds does not override column bounds
         for (key, bound) in assume.iter() {
@@ -877,13 +877,13 @@ impl Pldag {
     ///
     /// # Returns
     /// A `SparsePolyhedron` representing the DAG constraints
-    pub fn to_sparse_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> SparsePolyhedron {
+    pub fn to_sparse_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> Result<SparsePolyhedron> {
         // Create a new sparse matrix
         let mut a_matrix = SparseIntegerMatrix::new();
         let mut b_vector: Vec<i32> = Vec::new();
 
         // Get the sub tree from the roots
-        let sub_dag = self.sub_dag(roots.clone()).unwrap();
+        let sub_dag = self.sub_dag(roots.clone())?;
 
         // Filter out all Nodes that are primitives
         let primitives: IndexMap<&String, Bound> = sub_dag
@@ -927,19 +927,23 @@ impl Pldag {
             let ki = *column_names_map.get(key).unwrap();
 
             // Construct the inner bound of the composite
-            let coef_bounds = composite
-                .coefficients
-                .iter()
-                .map(|(coef_key, _)| {
-                    (
-                        coef_key.clone(),
-                        match sub_dag.get(coef_key) {
-                            Some(Node::Primitive(bound)) => *bound,
-                            _ => (0, 1),
-                        },
-                    )
-                })
-                .collect::<IndexMap<String, Bound>>();
+            let mut coef_bounds: IndexMap<String, Bound> = IndexMap::new();
+            for (coef_key, _) in composite.coefficients.iter() {
+                if let Some(node) = sub_dag.get(coef_key) {
+                    match node {
+                        Node::Primitive(b) => {
+                            coef_bounds.insert(coef_key.clone(), *b);
+                        }
+                        _ => {
+                            coef_bounds.insert(coef_key.clone(), (0, 1));
+                        }
+                    }
+                } else {
+                    return Err(PldagError::NodeNotFound {
+                        node_id: coef_key.clone(),
+                    });
+                }
+            }
 
             // An inner bound $\text{ib}(\phi)$ of a
             // linear inequality constraint $\phi$ is the sum of all variable's
@@ -1027,7 +1031,7 @@ impl Pldag {
                 .collect(),
         };
 
-        return polyhedron;
+        return Ok(polyhedron);
     }
 
     /// Converts the PL-DAG to a sparse polyhedron with default settings.
@@ -1037,7 +1041,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `SparsePolyhedron` with full constraint encoding
-    pub fn to_sparse_polyhedron_default(&self, roots: Vec<ID>) -> SparsePolyhedron {
+    pub fn to_sparse_polyhedron_default(&self, roots: Vec<ID>) -> Result<SparsePolyhedron> {
         self.to_sparse_polyhedron(roots, true)
     }
 
@@ -1048,18 +1052,18 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` representing the DAG constraints
-    pub fn to_dense_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> DensePolyhedron {
+    pub fn to_dense_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> Result<DensePolyhedron> {
         // Convert to sparse polyhedron first
-        let sparse_polyhedron = self.to_sparse_polyhedron(roots, double_binding);
+        let sparse_polyhedron = self.to_sparse_polyhedron(roots, double_binding)?;
         // Convert sparse to dense polyhedron
-        sparse_polyhedron.into()
+        Ok(sparse_polyhedron.into())
     }
 
     /// Converts the PL-DAG to a dense polyhedron with default settings.
     ///
     /// # Returns
     /// A `DensePolyhedron` with all constraint options enabled
-    pub fn to_dense_polyhedron_default(&self, roots: Vec<ID>) -> DensePolyhedron {
+    pub fn to_dense_polyhedron_default(&self, roots: Vec<ID>) -> Result<DensePolyhedron> {
         self.to_dense_polyhedron(roots, true)
     }
 
@@ -1670,7 +1674,7 @@ mod tests {
         m.set_primitive("x".into(), (0, 1));
         m.set_primitive("y", (0, 1));
         let root = m.set_and(vec!["x", "y"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1681,7 +1685,7 @@ mod tests {
         m.set_primitive("b".into(), (0, 1));
         m.set_primitive("c".into(), (0, 1));
         let root = m.set_or(vec!["a", "b", "c"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1690,7 +1694,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("p".into(), (0, 1));
         let root = m.set_not(vec!["p"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1701,7 +1705,7 @@ mod tests {
         m.set_primitive("y", (0, 1));
         m.set_primitive("z".into(), (0, 1));
         let root = m.set_xor(vec!["x", "y", "z"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1717,7 +1721,7 @@ mod tests {
         let w = m.set_and(vec!["x", "y"]);
         let nz = m.set_not(vec!["z"]);
         let v = m.set_or(vec![w.clone(), nz.clone()]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &v);
     }
 
@@ -1773,22 +1777,17 @@ mod tests {
     /// propagate should leave it as given (or you could choose to clamp / panic)—here
     /// we simply check that nothing blows up.
     #[test]
-    fn test_propagate_out_of_bounds_does_not_crash() {
+    fn test_propagate_out_of_bounds_should_crash() {
         let mut model = Pldag::new();
         model.set_primitive("u".into(), (0, 1));
-        let root = model.set_not(vec!["u"]);
 
         let mut interp = IndexMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u".into(), (5, 5));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp);
 
-        // we expect propagate to return exactly (5,5) for "u" and compute root = negate(5)
-        assert_eq!(res["u"], (5, 5));
-        // Depending on your semantic for negate, it might be
-        //   bound_multiply(-1,(5,5)) + bias
-        // so just check it didn’t panic:
-        let _ = res[&root];
+        // Assert that we did get an error
+        assert!(res.is_err());
     }
 
     #[test]
@@ -1814,14 +1813,14 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let polyhedron: DensePolyhedron = model.to_sparse_polyhedron_default(vec![]).into();
+        let polyhedron: DensePolyhedron = model.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model = Pldag::new();
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         let root = model.set_and(vec!["x", "y"]);
-        let polyhedron = model.to_sparse_polyhedron_default(vec![]).into();
+        let polyhedron = model.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model: Pldag = Pldag::new();
@@ -1829,7 +1828,7 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let polyhedron = model.to_sparse_polyhedron_default(vec![]).into();
+        let polyhedron = model.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
     }
 
@@ -1841,7 +1840,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("x".into(), (0, 1));
             let root = m.set_and::<&str>(vec!["x"]);
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
         // OR(y) == y
@@ -1849,7 +1848,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("y", (0, 1));
             let root = m.set_or(vec!["y"]);
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
         // XOR(z) == z
@@ -1857,7 +1856,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("z".into(), (0, 1));
             let root = m.set_xor(vec!["z"]);
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
     }
@@ -1868,7 +1867,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("x".into(), (0, 1));
         let root = m.set_and(vec!["x", "x"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1893,7 +1892,7 @@ mod tests {
         let w2 = m.set_or(vec![w1.clone(), c.to_string()]);
         let w3 = m.set_xor(vec![w2.clone(), d.to_string()]);
         let root = m.set_not(vec![w3.clone()]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).into();
+        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -2030,6 +2029,18 @@ mod tests {
         model.set_primitive("q", (0, 1));
         let root = model.set_and(vec!["p", "q", "r"]);
         let result = model.sub_dag(vec![root]);
+        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+    }
+
+    #[test]
+    fn test_node_not_found_error_when_to_polyhedron() {
+        // If we convert to a polyhedron with a variable that does not exist in the model,
+        // we should get a NodeNotFound error.
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        model.set_primitive("q", (0, 1));
+        let root = model.set_and(vec!["p", "q", "r"]);
+        let result = model.to_sparse_polyhedron_default(vec![root]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 }
