@@ -812,12 +812,12 @@ impl Pldag {
     /// * `roots` - Vector of root node IDs to start the sub-DAG extraction
     ///
     /// # Returns
-    /// A HashMap representing the sub-DAG with node IDs as keys and Nodes as values
-    pub fn sub_dag(&self, roots: Vec<ID>) -> HashMap<ID, Node> {
+    /// A HashMap of node IDs to their corresponding nodes in the sub-DAG
+    pub fn sub_dag(&self, roots: Vec<ID>) -> Result<HashMap<ID, Node>> {
         // By default use Rust implementation
         // If no roots, return empty tree
         if roots.is_empty() {
-            return self.dag();
+            return Ok(self.dag());
         }
 
         let mut queue: Vec<String> = roots;
@@ -828,6 +828,15 @@ impl Pldag {
         while queue.len() > 0 {
             // Batch fetch incoming edges for current batch
             let all_incoming = self.storage.get_nodes(&queue);
+
+            // Check that we got all nodes from queue in all_coming. 
+            // Else we return a NodeNotFound error.
+            for node_id in queue.iter() {
+                if !all_incoming.contains_key(node_id) {
+                    return Err(PldagError::NodeNotFound { node_id: node_id.to_string() });
+                }
+            }
+
             let mut next_batch = Vec::new();
 
             for (input_id, incoming) in all_incoming.iter() {
@@ -837,7 +846,7 @@ impl Pldag {
                         // Enqueue all coefficient variable IDs
                         for (coef_id, _) in constraint.coefficients.iter() {
                             if sub_dag.contains_key(coef_id) {
-                                panic!("Cycle detected in PL-DAG at node '{}'", coef_id);
+                                return Err(PldagError::CycleDetected { node_id: coef_id.to_string() });
                             }
                             if !next_batch.contains(coef_id) {
                                 next_batch.push(coef_id.clone());
@@ -851,7 +860,7 @@ impl Pldag {
             queue = next_batch;
         }
 
-        sub_dag
+        Ok(sub_dag)
     }
 
     pub fn dag(&self) -> HashMap<ID, Node> {
@@ -874,7 +883,7 @@ impl Pldag {
         let mut b_vector: Vec<i32> = Vec::new();
 
         // Get the sub tree from the roots
-        let sub_dag = self.sub_dag(roots.clone());
+        let sub_dag = self.sub_dag(roots.clone()).unwrap();
 
         // Filter out all Nodes that are primitives
         let primitives: IndexMap<&String, Bound> = sub_dag
@@ -1059,7 +1068,7 @@ impl Pldag {
     /// # Returns
     /// An `IndexMap` mapping variable IDs to their corresponding `Bound` objects
     pub fn get_primitives(&self, roots: Vec<String>) -> IndexMap<String, Bound> {
-        let sub_dag = self.sub_dag(roots);
+        let sub_dag = self.sub_dag(roots).unwrap();
         sub_dag
             .iter()
             .filter_map(|(key, node)| {
@@ -1077,7 +1086,7 @@ impl Pldag {
     /// # Returns
     /// An `IndexMap` mapping constraint IDs to their corresponding `Constraint` objects
     pub fn get_composites(&self, roots: Vec<String>) -> IndexMap<String, Constraint> {
-        let sub_dag = self.sub_dag(roots);
+        let sub_dag = self.sub_dag(roots).unwrap();
         sub_dag
             .iter()
             .filter_map(|(key, node)| {
@@ -1999,7 +2008,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_not_found_error() {
+    fn test_node_not_found_error_when_propagate() {
         // If we propagate a variable that does not exist in the model,
         // we should get a NodeNotFound error.
         let mut model = Pldag::new();
@@ -2009,6 +2018,18 @@ mod tests {
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("q".into(), (0, 1));
         let result = model.propagate(interp);
+        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+    }
+
+    #[test]
+    fn test_node_not_found_error_when_sub_dag() {
+        // If we create a sub-dag with a variable that does not exist in the model,
+        // we should get a NodeNotFound error.
+        let mut model = Pldag::new();
+        model.set_primitive("p", (0, 1));
+        model.set_primitive("q", (0, 1));
+        let root = model.set_and(vec!["p", "q", "r"]);
+        let result = model.sub_dag(vec![root]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 }
