@@ -727,20 +727,24 @@ impl Pldag {
         objectives: Vec<HashMap<&str, f64>>,
         assume: HashMap<&str, Bound>,
         maximize: bool,
-    ) -> Vec<Option<Assignment>> {
+    ) -> Result<Vec<Option<Assignment>>> {
         use glpk_rust::{
             solve_ilps, IntegerSparseMatrix, Solution, SparseLEIntegerPolyhedron, Status, Variable,
         };
 
         // Convert the PL-DAG to a polyhedron representation
-        let polyhedron = self.to_sparse_polyhedron(roots, true).unwrap();
+        let polyhedron = self.to_sparse_polyhedron(roots, true)?;
 
         // Validate assume that the bounds does not override column bounds
         for (key, bound) in assume.iter() {
             if let Some(idx) = polyhedron.columns.iter().position(|col| col == key) {
                 let col_bound = polyhedron.column_bounds[idx];
                 if bound.0 < col_bound.0 || bound.1 > col_bound.1 {
-                    return vec![None; objectives.len()];
+                    return Err(PldagError::NodeOutOfBounds {
+                        node_id: key.to_string(),
+                        got_bound: *bound,
+                        expected_bound: col_bound,
+                    });
                 }
             }
         }
@@ -788,7 +792,7 @@ impl Pldag {
             solutions = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
         }
 
-        return solutions
+        return Ok(solutions
             .iter()
             .map(|solution| {
                 if solution.status == Status::Optimal {
@@ -802,7 +806,7 @@ impl Pldag {
                     None
                 }
             })
-            .collect();
+            .collect());
     }
 
     /// Extracts a sub-DAG containing all nodes reachable from the given roots.
