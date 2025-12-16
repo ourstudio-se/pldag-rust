@@ -658,6 +658,37 @@ impl Pldag {
         Pldag { storage }
     }
 
+    /// Estimates an upper bound on the count of feasible assignments in the DAG.
+    ///
+    /// # Arguments
+    /// * `dag` - mapping from node name to Node (Primitive / Composite)
+    /// * `assumptions` - mapping from node name to assumed bound
+    ///
+    /// # Returns
+    /// An estimated upper bound on the count of feasible assignments
+    pub fn estimate_upper_bound_count(
+        dag: &HashMap<String, Node>,
+        assumptions: &HashMap<String, Bound>,
+    ) -> Result<usize> {
+        let tightened = Pldag::tighten(dag, assumptions)?;
+
+        let mut count = 1usize;
+        for (_name, node) in dag.iter() {
+            match node {
+                Node::Primitive(_) => {
+                    // Primitive node: multiply by the size of its bound
+                    let bound = tightened.get(_name).unwrap_or(&(0, 0));
+                    let size = (bound.1 - bound.0 + 1) as usize;
+                    count *= size;
+                }
+                // Composite nodes do not contribute to count, only restricts from the primitives
+                Node::Composite(_) => continue, 
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Full tightening over the DAG given initial assumptions.
     ///
     /// - `dag`: mapping from node name to Node (Primitive / Composite)
@@ -916,8 +947,7 @@ impl Pldag {
     /// # Returns
     /// Vector of optional valued assignments, one for each objective. None if infeasible.
     pub fn solve(
-        &self,
-        roots: Vec<ID>,
+        dag: &HashMap<ID, Node>,
         objectives: Vec<HashMap<&str, f64>>,
         assume: HashMap<&str, Bound>,
         maximize: bool,
@@ -927,7 +957,7 @@ impl Pldag {
         };
 
         // Convert the PL-DAG to a polyhedron representation
-        let polyhedron = self.to_sparse_polyhedron(roots, true)?;
+        let polyhedron = Self::to_sparse_polyhedron(dag, true)?;
 
         // Validate assume that the bounds does not override column bounds
         for (key, bound) in assume.iter() {
@@ -1038,13 +1068,18 @@ impl Pldag {
             let mut next_batch = Vec::new();
 
             for (input_id, incoming) in all_incoming.iter() {
+
+                // Add this node to the sub_dag
+                sub_dag.insert(input_id.clone(), incoming.clone());
+
+                // If it is a composite, enqueue its coefficients if not already present
                 match incoming {
                     Node::Primitive(_) => {}
                     Node::Composite(constraint) => {
                         // Enqueue all coefficient variable IDs
                         for (coef_id, _) in constraint.coefficients.iter() {
                             if sub_dag.contains_key(coef_id) {
-                                return Err(PldagError::CycleDetected { node_id: coef_id.to_string() });
+                                continue;
                             }
                             if !next_batch.contains(coef_id) {
                                 next_batch.push(coef_id.clone());
@@ -1052,8 +1087,6 @@ impl Pldag {
                         }
                     }
                 }
-                next_batch.push(input_id.clone());
-                sub_dag.insert(input_id.clone(), incoming.clone());
             }
             queue = next_batch;
         }
@@ -1071,20 +1104,18 @@ impl Pldag {
     /// inequalities suitable for integer linear programming solvers.
     ///
     /// # Arguments
+    /// * `dag` - mapping from node ID to Node (Primitive / Composite)
     /// * `double_binding` - If true, creates bidirectional implications for composite nodes
     ///
     /// # Returns
     /// A `SparsePolyhedron` representing the DAG constraints
-    pub fn to_sparse_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> Result<SparsePolyhedron> {
+    pub fn to_sparse_polyhedron(dag: &HashMap<ID, Node>, double_binding: bool) -> Result<SparsePolyhedron> {
         // Create a new sparse matrix
         let mut a_matrix = SparseIntegerMatrix::new();
         let mut b_vector: Vec<i32> = Vec::new();
 
-        // Get the sub tree from the roots
-        let sub_dag = self.sub_dag(roots.clone())?;
-
         // Filter out all Nodes that are primitives
-        let primitives: IndexMap<&String, Bound> = sub_dag
+        let primitives: IndexMap<&String, Bound> = dag
             .iter()
             .sorted_by(|a, b| a.0.cmp(&b.0))
             .filter_map(|(key, node)| {
@@ -1097,7 +1128,7 @@ impl Pldag {
             .collect();
 
         // Filter out all Nodes that are composites
-        let composites: IndexMap<&String, &Constraint> = sub_dag
+        let composites: IndexMap<&String, &Constraint> = dag
             .iter()
             .sorted_by(|a, b| a.0.cmp(&b.0))
             .filter_map(|(key, node)| {
@@ -1127,7 +1158,7 @@ impl Pldag {
             // Construct the inner bound of the composite
             let mut coef_bounds: IndexMap<String, Bound> = IndexMap::new();
             for (coef_key, _) in composite.coefficients.iter() {
-                if let Some(node) = sub_dag.get(coef_key) {
+                if let Some(node) = dag.get(coef_key) {
                     match node {
                         Node::Primitive(b) => {
                             coef_bounds.insert(coef_key.clone(), *b);
@@ -1221,7 +1252,7 @@ impl Pldag {
             column_bounds: column_names_map
                 .keys()
                 .map(|key| {
-                    match sub_dag.get(key) {
+                    match dag.get(key) {
                         Some(Node::Primitive(bound)) => *bound,
                         _ => (0, 1),
                     }
@@ -1239,8 +1270,8 @@ impl Pldag {
     ///
     /// # Returns
     /// A `SparsePolyhedron` with full constraint encoding
-    pub fn to_sparse_polyhedron_default(&self, roots: Vec<ID>) -> Result<SparsePolyhedron> {
-        self.to_sparse_polyhedron(roots, true)
+    pub fn to_sparse_polyhedron_default(dag: &HashMap<ID, Node>) -> Result<SparsePolyhedron> {
+        Self::to_sparse_polyhedron(dag, true)
     }
 
     /// Converts the PL-DAG to a dense polyhedron.
@@ -1250,9 +1281,9 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` representing the DAG constraints
-    pub fn to_dense_polyhedron(&self, roots: Vec<ID>, double_binding: bool) -> Result<DensePolyhedron> {
+    pub fn to_dense_polyhedron(dag: &HashMap<ID, Node>, double_binding: bool) -> Result<DensePolyhedron> {
         // Convert to sparse polyhedron first
-        let sparse_polyhedron = self.to_sparse_polyhedron(roots, double_binding)?;
+        let sparse_polyhedron = Self::to_sparse_polyhedron(dag, double_binding)?;
         // Convert sparse to dense polyhedron
         Ok(sparse_polyhedron.into())
     }
@@ -1261,8 +1292,8 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` with all constraint options enabled
-    pub fn to_dense_polyhedron_default(&self, roots: Vec<ID>) -> Result<DensePolyhedron> {
-        self.to_dense_polyhedron(roots, true)
+    pub fn to_dense_polyhedron_default(dag: &HashMap<ID, Node>) -> Result<DensePolyhedron> {
+        Self::to_dense_polyhedron(dag, true)
     }
 
     /// Retrieves all primitive variables from the given PL-DAG roots.
@@ -1311,6 +1342,28 @@ impl Pldag {
         self.storage.get_nodes(&[id.to_string()]).get(id).cloned()
     }
 
+    /// Deletes a node from the PL-DAG by its ID.
+    ///
+    /// # Arguments
+    /// * `id` - The unique identifier of the node to delete
+    /// 
+    /// Note: 
+    ///
+    /// Returns nothing.
+    pub fn delete_node(&mut self, id: &str) -> Result<()> {
+        let parents = self.storage.get_parent_ids(&[id.to_string()]);
+        if let Some(parents) = parents.get(id) {
+            if !parents.is_empty() {
+                return Err(PldagError::NodeReferenced {
+                    node_id: id.to_string(),
+                    referencing_nodes: parents.clone(),
+                });
+            }
+        }
+        self.storage.delete(id);
+        return Ok(());
+    }
+
     /// Creates a primitive (leaf) variable with the specified bounds.
     ///
     /// Primitive variables represent the base variables in the DAG and have
@@ -1351,7 +1404,7 @@ impl Pldag {
     /// * `bias` - Constant bias term
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_gelineq<K>(
         &mut self,
         coefficient_variables: impl IntoIterator<Item = (K, i32)>,
@@ -1393,7 +1446,7 @@ impl Pldag {
     /// * `value` - Minimum required sum
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_atleast<K>(
         &mut self,
         references: impl IntoIterator<Item = K>,
@@ -1430,7 +1483,7 @@ impl Pldag {
     /// * `value` - Maximum allowed sum
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_atmost<K>(
         &mut self,
         references: impl IntoIterator<Item = K>,
@@ -1469,7 +1522,7 @@ impl Pldag {
     /// * `value` - Required exact sum
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_equal<K, I>(
         &mut self,
         references: I,
@@ -1508,7 +1561,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to AND together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1528,7 +1581,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to OR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1536,6 +1589,25 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
         self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1)
+    }
+
+    /// Creates a logical OPTIONAL constraint.
+    ///
+    /// Returns true no matter the referenced variables are true or false.
+    /// Implemented as: sum(references) <= len(references).
+    ///
+    /// # Arguments
+    /// * `references` - Variable IDs to make optional
+    ///
+    /// # Returns
+    /// The unique ID assigned to this constraint
+    pub fn set_optional<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    where
+        K: ToString,
+    {
+        let unique_references: IndexSet<String> =
+            references.into_iter().map(|x| x.to_string()).collect();
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), unique_references.len() as i32)
     }
 
     /// Creates a logical NAND constraint.
@@ -1547,7 +1619,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to NAND together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1570,7 +1642,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to NOR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1589,7 +1661,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to negate
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1608,7 +1680,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to XOR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1629,7 +1701,7 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to XNOR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
     where
         K: ToString,
@@ -1651,7 +1723,7 @@ impl Pldag {
     /// * `consequence` - The consequence variable ID
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> ID
     where
         C: ToString,
@@ -1671,7 +1743,7 @@ impl Pldag {
     /// * `rhs` - The right-hand side variable ID
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint OR None if it failed to create the constraint
+    /// The unique ID assigned to this constraint
     pub fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> ID
     where
         L: ToString,
@@ -1889,7 +1961,7 @@ mod tests {
         m.set_primitive("x".into(), (0, 1));
         m.set_primitive("y", (0, 1));
         let root = m.set_and(vec!["x", "y"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1900,7 +1972,7 @@ mod tests {
         m.set_primitive("b".into(), (0, 1));
         m.set_primitive("c".into(), (0, 1));
         let root = m.set_or(vec!["a", "b", "c"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1909,7 +1981,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("p".into(), (0, 1));
         let root = m.set_not(vec!["p"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1920,7 +1992,7 @@ mod tests {
         m.set_primitive("y", (0, 1));
         m.set_primitive("z".into(), (0, 1));
         let root = m.set_xor(vec!["x", "y", "z"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -1936,7 +2008,7 @@ mod tests {
         let w = m.set_and(vec!["x", "y"]);
         let nz = m.set_not(vec!["z"]);
         let v = m.set_or(vec![w.clone(), nz.clone()]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &v);
     }
 
@@ -2028,14 +2100,14 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let polyhedron: DensePolyhedron = model.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let polyhedron: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model = Pldag::new();
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         let root = model.set_and(vec!["x", "y"]);
-        let polyhedron = model.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model: Pldag = Pldag::new();
@@ -2043,7 +2115,7 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
         let root = model.set_xor(vec!["x", "y", "z".into()]);
-        let polyhedron = model.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
     }
 
@@ -2055,7 +2127,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("x".into(), (0, 1));
             let root = m.set_and::<&str>(vec!["x"]);
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
         // OR(y) == y
@@ -2063,7 +2135,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("y", (0, 1));
             let root = m.set_or(vec!["y"]);
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
         // XOR(z) == z
@@ -2071,7 +2143,7 @@ mod tests {
             let mut m = Pldag::new();
             m.set_primitive("z".into(), (0, 1));
             let root = m.set_xor(vec!["z"]);
-            let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
     }
@@ -2082,7 +2154,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("x".into(), (0, 1));
         let root = m.set_and(vec!["x", "x"]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -2107,7 +2179,7 @@ mod tests {
         let w2 = m.set_or(vec![w1.clone(), c.to_string()]);
         let w3 = m.set_xor(vec![w2.clone(), d.to_string()]);
         let root = m.set_not(vec![w3.clone()]);
-        let poly: DensePolyhedron = m.to_sparse_polyhedron_default(vec![]).unwrap().into();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
 
@@ -2255,7 +2327,7 @@ mod tests {
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
         let root = model.set_and(vec!["p", "q", "r"]);
-        let result = model.to_sparse_polyhedron_default(vec![root]);
+        let result = model.sub_dag(vec![root]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
@@ -2407,5 +2479,116 @@ mod tests {
         let values = Pldag::tighten(&dag, &assumptions).unwrap();
         assert_eq!(values.get("y"), Some(&(0, 0)));
         assert_eq!(values.get("z"), Some(&(0, 0)));
+    }
+
+    #[test]
+    fn test_estimate_count_upper_bounds_on_an_xor() {
+        // A = B + C >= 2
+        // B = x + y + z >= 1
+        // C = -x -y -z >= -1
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("z".into(), prim(0, 1));
+        dag.insert("B".into(), cons(vec![("x", 1), ("y", 1), ("z", 1)], -1));
+        dag.insert("C".into(), cons(vec![("x", -1), ("y", -1), ("z", -1)], 1));
+        dag.insert("A".into(), cons(vec![("B", 1), ("C", 1)], -2)); // A equiv xor(x,y,z)
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (1, 1));
+        assumptions.insert("x".into(), (1, 1));
+        let ub_count = Pldag::estimate_upper_bound_count(&dag, &assumptions).unwrap();
+        assert_eq!(ub_count, 1);
+    }
+
+    #[test]
+    fn test_estimate_count_upper_bounds_on_an_and() {
+        // A = x + y >= 2 when A is TRUE
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1)], -2)); // A equiv and(x,y)
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (1, 1));
+        let ub_count = Pldag::estimate_upper_bound_count(&dag, &assumptions).unwrap();
+        assert_eq!(ub_count, 1);
+
+        // A = x + y >= 2 when A is FALSE
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1)], -2)); // A equiv and(x,y)
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (0, 1));
+        let ub_count = Pldag::estimate_upper_bound_count(&dag, &assumptions).unwrap();
+        assert_eq!(ub_count, 4);
+    }
+
+    #[test]
+    fn test_estimate_count_upper_bounds_on_an_or() {
+        // A = x + y >= 1 when A is TRUE
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1)], -1)); // A equiv or(x,y)
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (1, 1));
+        let ub_count = Pldag::estimate_upper_bound_count(&dag, &assumptions).unwrap();
+        assert_eq!(ub_count, 4);   
+        
+        // A = x + y >= 1 when A is FALSE
+        let mut dag = HashMap::new();
+        dag.insert("x".into(), prim(0, 1));
+        dag.insert("y".into(), prim(0, 1));
+        dag.insert("A".into(), cons(vec![("x", 1), ("y", 1)], -1)); // A equiv or(x,y)
+        let mut assumptions = HashMap::new();
+        assumptions.insert("A".into(), (0, 0));
+        let ub_count = Pldag::estimate_upper_bound_count(&dag, &assumptions).unwrap();
+        assert_eq!(ub_count, 1);   
+    }
+
+    #[test]
+    fn test_simple_sub_dag_with_xor() {
+        let mut model = Pldag::new();
+        model.set_primitive("x".into(), (0, 1));
+        model.set_primitive("y", (0, 1));
+        model.set_primitive("z".into(), (0, 1));
+        let root = model.set_xor(vec!["x", "y", "z"]);
+        let sub_dag = model.sub_dag(vec![root.clone()]).unwrap();
+        assert!(sub_dag.get(&root).is_some());
+    }
+
+    #[test]
+    fn test_delete_node_should_succeed() {
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("b".into(), (0, 1));
+        let and_node = model.set_and(vec!["a", "b"]);
+        let delete_result = model.delete_node(&and_node);
+        assert!(delete_result.is_ok());
+        assert!(model.get_node(&and_node).is_none());
+    }
+
+    #[test]
+    fn test_delete_primitives_should_succeed() {
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("b".into(), (0, 1));
+        let delete_result_a = model.delete_node(&"a");
+        let delete_result_b = model.delete_node(&"b");
+        assert!(delete_result_a.is_ok());
+        assert!(delete_result_b.is_ok());
+        assert!(model.get_node(&"a").is_none());
+        assert!(model.get_node(&"b").is_none());
+    }
+
+    #[test]
+    fn test_delete_node_should_fail_for_still_having_references() {
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("b".into(), (0, 1));
+        let and_node = model.set_and(vec!["a", "b"]);
+        model.set_or(vec![and_node.clone(), "a".into()]);
+        let delete_result = model.delete_node(&and_node);
+        assert!(delete_result.is_err());
     }
 }

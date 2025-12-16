@@ -25,6 +25,9 @@ pub trait KeyValueStore: Send + Sync {
 
     /// Delete a key
     fn delete(&self, key: &str);
+
+    /// Get all key-value pairs with keys starting with the given prefix
+    fn get_prefix(&self, prefix: &str) -> HashMap<String, Value>;
 }
 
 /// Abstract interface for key-value storage backends
@@ -53,6 +56,9 @@ pub trait NodeStoreTrait: Send + Sync {
 
     /// Get all children node ids that the given id points to
     fn get_children_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>>;
+
+    /// Get a reference to the underlying KeyValueStore for custom storage needs
+    fn get_kv_store(&self) -> &dyn KeyValueStore;
 }
 
 pub struct NodeStore {
@@ -62,6 +68,11 @@ pub struct NodeStore {
 impl NodeStore {
     pub fn new(store: Box<dyn KeyValueStore>) -> Self {
         Self { data: store }
+    }
+
+    /// Get a reference to the underlying KeyValueStore
+    pub fn store(&self) -> &dyn KeyValueStore {
+        &*self.data
     }
 }
 
@@ -189,6 +200,10 @@ impl NodeStoreTrait for NodeStore {
             })
             .collect::<HashMap<String, Vec<String>>>()
     }
+
+    fn get_kv_store(&self) -> &dyn KeyValueStore {
+        &*self.data
+    }
 }
 
 /// In-memory storage implementation (for testing/development)
@@ -247,5 +262,13 @@ impl KeyValueStore for InMemoryStore {
     fn delete(&self, key: &str) {
         let mut data = self.data.write().unwrap();
         data.remove(key);
+    }
+
+    fn get_prefix(&self, prefix: &str) -> HashMap<String, Value> {
+        let data = self.data.read().unwrap();
+        data.iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
     }
 }

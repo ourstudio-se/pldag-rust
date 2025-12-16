@@ -27,6 +27,12 @@ pub enum PldagError {
     MaxIterationsExceeded {
         max_iters: usize,
     },
+
+    // When deleting a node that is referenced by other nodes
+    NodeReferenced {
+        node_id: String,
+        referencing_nodes: Vec<String>,
+    },
 }
 
 impl fmt::Display for PldagError {
@@ -51,6 +57,16 @@ impl fmt::Display for PldagError {
             }
             PldagError::MaxIterationsExceeded { max_iters } => {
                 write!(f, "Max iterations exceeded during tightening: {}", max_iters)
+            }
+            PldagError::NodeReferenced {
+                node_id,
+                referencing_nodes,
+            } => {
+                write!(
+                    f,
+                    "Cannot delete node '{}'; it is referenced by nodes: {:?}",
+                    node_id, referencing_nodes
+                )
             }
         }
     }
