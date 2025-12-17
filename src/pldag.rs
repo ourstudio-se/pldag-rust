@@ -1448,8 +1448,9 @@ impl Pldag {
     /// # Arguments
     /// * `id` - Unique identifier for the variable
     /// * `bound` - The allowed range (min, max) for this variable
-    pub fn set_primitive(&mut self, id: &str, bound: Bound) {
+    pub fn set_primitive(&mut self, id: &str, bound: Bound) -> Result<ID> {
         self.storage.set_node(id, Node::Primitive(bound));
+        Ok(id.to_string())
     }
 
     /// Creates multiple primitive variables with the same bounds.
@@ -1460,14 +1461,16 @@ impl Pldag {
     /// # Arguments
     /// * `ids` - Iterator of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
-    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound)
+    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Vec<Result<ID>>
     where
         K: ToString,
     {
         let unique_ids: IndexSet<String> = ids.into_iter().map(|k| k.to_string()).collect();
-        for id in unique_ids {
-            self.set_primitive(&id, bound);
-        }
+        let results: Vec<Result<ID>> = unique_ids
+            .iter()
+            .map(|id| self.set_primitive(id, bound))
+            .collect();
+        results
     }
 
     /// Creates a general linear inequality constraint.
