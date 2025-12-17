@@ -10,11 +10,11 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let _root = dag.set_or(vec!["x", "y", "z"]);
+        let _root = dag.set_or(vec!["x", "y", "z"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new(); // dummy objective
         let mut assume = HashMap::<&str, Bound>::new(); // no fixed vars
-        assume.insert(&_root, (1, 1));
+        assume.insert(_root.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "model should be feasible");
@@ -31,11 +31,11 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let and_node = dag.set_and(vec!["x", "y", "z"]);
+        let and_node = dag.set_and(vec!["x", "y", "z"]).unwrap();
 
         let objective = HashMap::<&str, f64>::from_iter(vec![("x", 1.0), ("y", 1.0), ("z", 1.0)]);
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&and_node, (1, 1));
+        assume.insert(and_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "AND with all true should be feasible");
@@ -52,14 +52,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let and_node = dag.set_and(vec!["x", "y", "z"]);
+        let and_node = dag.set_and(vec!["x", "y", "z"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&and_node, (1, 1));
+        assume.insert(and_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -73,17 +73,17 @@ mod glpk_tests {
         // ¬x with x boolean
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
-        let not_node = dag.set_not(vec!["x"]);
+        let not_node = dag.set_not(vec!["x"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&not_node, (1, 1));
+        assume.insert(not_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "NOT constraint should be feasible");
         let soln = solns[0].as_ref().unwrap();
         assert_eq!(*soln.get("x").unwrap(), (0, 0));
-        assert_eq!(*soln.get(&not_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(not_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -93,11 +93,11 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let xor_node = dag.set_xor(vec!["x", "y", "z"]);
+        let xor_node = dag.set_xor(vec!["x", "y", "z"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&xor_node, (1, 1));
+        assume.insert(xor_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "XOR constraint should be feasible");
@@ -120,11 +120,11 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let nand_node = dag.set_nand(vec!["x", "y"]);
+        let nand_node = dag.set_nand(vec!["x", "y"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&nand_node, (1, 1));
+        assume.insert(nand_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "NAND constraint should be feasible");
@@ -144,11 +144,11 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let nor_node = dag.set_nor(vec!["x", "y"]);
+        let nor_node = dag.set_nor(vec!["x", "y"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&nor_node, (1, 1));
+        assume.insert(nor_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "NOR constraint should be feasible");
@@ -164,11 +164,11 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let xnor_node = dag.set_xnor(vec!["x", "y"]);
+        let xnor_node = dag.set_xnor(vec!["x", "y"]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&xnor_node, (1, 1));
+        assume.insert(xnor_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "XNOR constraint should be feasible");
@@ -185,13 +185,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let imply_node = dag.set_imply("x", "y");
+        let imply_node = dag.set_imply("x", "y").unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
-        assume.insert(&imply_node, (1, 1));
+        assume.insert(imply_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -199,7 +199,7 @@ mod glpk_tests {
             "Implication x=1, y=1 should be feasible"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&imply_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(imply_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -208,13 +208,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let imply_node = dag.set_imply("x", "y");
+        let imply_node = dag.set_imply("x", "y").unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (0, 0));
-        assume.insert(&imply_node, (1, 1));
+        assume.insert(imply_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -229,12 +229,12 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let imply_node = dag.set_imply("x", "y");
+        let imply_node = dag.set_imply("x", "y").unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (0, 0));
-        assume.insert(&imply_node, (1, 1));
+        assume.insert(imply_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -242,7 +242,7 @@ mod glpk_tests {
             "Implication x=0, y=any should be feasible"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&imply_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(imply_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -251,13 +251,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let equiv_node = dag.set_equiv("x", "y");
+        let equiv_node = dag.set_equiv("x", "y").unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
-        assume.insert(&equiv_node, (1, 1));
+        assume.insert(equiv_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -265,7 +265,7 @@ mod glpk_tests {
             "Equivalence x=1, y=1 should be feasible"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&equiv_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(equiv_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -274,13 +274,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let equiv_node = dag.set_equiv("x", "y");
+        let equiv_node = dag.set_equiv("x", "y").unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (0, 0));
         assume.insert("y", (0, 0));
-        assume.insert(&equiv_node, (1, 1));
+        assume.insert(equiv_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -288,7 +288,7 @@ mod glpk_tests {
             "Equivalence x=0, y=0 should be feasible"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&equiv_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(equiv_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -297,13 +297,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let equiv_node = dag.set_equiv("x", "y");
+        let equiv_node = dag.set_equiv("x", "y").unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (0, 0));
-        assume.insert(&equiv_node, (1, 1));
+        assume.insert(equiv_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -319,14 +319,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let atleast_node = dag.set_atleast(vec!["x", "y", "z"], 2);
+        let atleast_node = dag.set_atleast(vec!["x", "y", "z"], 2).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&atleast_node, (0, 1));
+        assume.insert(atleast_node.as_str(), (0, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -334,7 +334,7 @@ mod glpk_tests {
             "At least 2 constraint should be satisfied"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&atleast_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(atleast_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -344,14 +344,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let atleast_node = dag.set_atleast(vec!["x", "y", "z"], 2);
+        let atleast_node = dag.set_atleast(vec!["x", "y", "z"], 2).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (0, 0));
         assume.insert("z", (0, 0));
-        assume.insert(&atleast_node, (1, 1));
+        assume.insert(atleast_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -367,14 +367,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let atmost_node = dag.set_atmost(vec!["x", "y", "z"], 2);
+        let atmost_node = dag.set_atmost(vec!["x", "y", "z"], 2).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&atmost_node, (0, 1));
+        assume.insert(atmost_node.as_str(), (0, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -382,7 +382,7 @@ mod glpk_tests {
             "At most 2 constraint should be satisfied"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&atmost_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(atmost_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -392,14 +392,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let atmost_node = dag.set_atmost(vec!["x", "y", "z"], 1);
+        let atmost_node = dag.set_atmost(vec!["x", "y", "z"], 1).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&atmost_node, (1, 1));
+        assume.insert(atmost_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -415,19 +415,19 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let equal_node = dag.set_equal(vec!["x", "y", "z"], 2);
+        let equal_node = dag.set_equal(vec!["x", "y", "z"], 2).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&equal_node, (1, 1));
+        assume.insert(equal_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Equal 2 constraint should be satisfied");
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&equal_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(equal_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -437,14 +437,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
-        let equal_node = dag.set_equal(vec!["x", "y", "z"], 2);
+        let equal_node = dag.set_equal(vec!["x", "y", "z"], 2).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (0, 0));
         assume.insert("z", (0, 0));
-        assume.insert(&equal_node, (1, 1));
+        assume.insert(equal_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -460,14 +460,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
         dag.set_primitive("z", (0, 5));
-        let gelineq_node = dag.set_gelineq(vec![("x", 2), ("y", 3), ("z", -1)], -4);
+        let gelineq_node = dag.set_gelineq(vec![("x", 2), ("y", 3), ("z", -1)], -4).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (2, 2));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&gelineq_node, (1, 1));
+        assume.insert(gelineq_node.as_str(), (1, 1));
         // 2*2 + 3*1 - 0 = 7 >= 4, so constraint should be satisfied
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
@@ -476,7 +476,7 @@ mod glpk_tests {
             "General linear inequality should be satisfied"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&gelineq_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(gelineq_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -486,14 +486,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
         dag.set_primitive("z", (0, 5));
-        let gelineq_node = dag.set_gelineq(vec![("x", 2), ("y", 3), ("z", -1)], -4);
+        let gelineq_node = dag.set_gelineq(vec![("x", 2), ("y", 3), ("z", -1)], -4).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (0, 0));
         assume.insert("z", (0, 0));
-        assume.insert(&gelineq_node, (1, 1));
+        assume.insert(gelineq_node.as_str(), (1, 1));
         // 2*1 + 3*0 - 0 = 2 < 4, so constraint should not be satisfied
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
@@ -512,9 +512,9 @@ mod glpk_tests {
         dag.set_primitive("z", (0, 1));
         dag.set_primitive("w", (0, 1));
 
-        let and1 = dag.set_and(vec!["x", "y"]);
-        let and2 = dag.set_and(vec!["z", "w"]);
-        let or_root = dag.set_or(vec![and1, and2]);
+        let and1 = dag.set_and(vec!["x", "y"]).unwrap();
+        let and2 = dag.set_and(vec!["z", "w"]).unwrap();
+        let or_root = dag.set_or(vec![and1, and2]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
@@ -522,7 +522,7 @@ mod glpk_tests {
         assume.insert("y", (1, 1));
         assume.insert("z", (1, 1));
         assume.insert("w", (1, 1));
-        assume.insert(&or_root, (1, 1));
+        assume.insert(or_root.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -530,7 +530,7 @@ mod glpk_tests {
             "Nested structure should be feasible when second branch is true"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&or_root).unwrap(), (1, 1));
+        assert_eq!(*soln.get(or_root.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -543,9 +543,9 @@ mod glpk_tests {
         dag.set_primitive("b", (0, 1));
         dag.set_primitive("c", (0, 1));
 
-        let and_node = dag.set_and(vec!["x", "y"]);
-        let atleast_node = dag.set_atleast(vec!["a", "b", "c"], 2);
-        let imply_node = dag.set_imply(and_node, atleast_node);
+        let and_node = dag.set_and(vec!["x", "y"]).unwrap();
+        let atleast_node = dag.set_atleast(vec!["a", "b", "c"], 2).unwrap();
+        let imply_node = dag.set_imply(and_node, atleast_node).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
@@ -554,12 +554,12 @@ mod glpk_tests {
         assume.insert("a", (1, 1));
         assume.insert("b", (1, 1));
         assume.insert("c", (0, 0));
-        assume.insert(&imply_node, (1, 1));
+        assume.insert(imply_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Mixed constraint should be feasible");
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&imply_node).unwrap(), (1, 1));
+        assert_eq!(*soln.get(imply_node.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -572,10 +572,10 @@ mod glpk_tests {
         dag.set_primitive("w", (0, 1));
         dag.set_primitive("v", (0, 1));
 
-        let or_inner = dag.set_or(vec!["w", "v"]);
-        let and_inner = dag.set_and(vec!["z".to_string(), or_inner]);
-        let or_middle = dag.set_or(vec!["y".to_string(), and_inner]);
-        let and_root = dag.set_and(vec!["x".to_string(), or_middle]);
+        let or_inner = dag.set_or(vec!["w", "v"]).unwrap();
+        let and_inner = dag.set_and(vec!["z".to_string(), or_inner]).unwrap();
+        let or_middle = dag.set_or(vec!["y".to_string(), and_inner]).unwrap();
+        let and_root = dag.set_and(vec!["x".to_string(), or_middle]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
@@ -584,12 +584,12 @@ mod glpk_tests {
         assume.insert("z", (1, 1));
         assume.insert("w", (0, 0));
         assume.insert("v", (1, 1));
-        assume.insert(&and_root, (1, 1));
+        assume.insert(and_root.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Deep nesting should be feasible");
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&and_root).unwrap(), (1, 1));
+        assert_eq!(*soln.get(and_root.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -599,15 +599,15 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
 
-        let and_node = dag.set_and(vec!["x", "y"]);
-        let or_node = dag.set_or(vec![and_node.clone(), "x".to_string()]);
+        let and_node = dag.set_and(vec!["x", "y"]).unwrap();
+        let or_node = dag.set_or(vec![and_node.clone(), "x".to_string()]).unwrap();
 
         // This should work fine - no circular dependency
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (0, 0));
-        assume.insert(&or_node, (1, 1));
+        assume.insert(or_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Valid DAG structure should be feasible");
@@ -621,17 +621,17 @@ mod glpk_tests {
         dag.set_primitive("y", (0, 1));
         dag.set_primitive("z", (0, 1));
 
-        let and_node = dag.set_and(vec!["x", "y"]);
-        let or_node1 = dag.set_or(vec![and_node.clone(), "z".to_string()]);
-        let or_node2 = dag.set_or(vec![and_node.clone(), "x".to_string()]);
-        let final_and = dag.set_and(vec![or_node1, or_node2]);
+        let and_node = dag.set_and(vec!["x", "y"]).unwrap();
+        let or_node1 = dag.set_or(vec![and_node.clone(), "z".to_string()]).unwrap();
+        let or_node2 = dag.set_or(vec![and_node.clone(), "x".to_string()]).unwrap();
+        let final_and = dag.set_and(vec![or_node1, or_node2]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
         assume.insert("y", (1, 1));
         assume.insert("z", (0, 0));
-        assume.insert(&final_and, (1, 1));
+        assume.insert(final_and.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -639,7 +639,7 @@ mod glpk_tests {
             "Multiple references to same node should work"
         );
         let soln = solns[0].as_ref().unwrap();
-        assert_eq!(*soln.get(&final_and).unwrap(), (1, 1));
+        assert_eq!(*soln.get(final_and.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -648,13 +648,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
-        let atmost_node = dag.set_atmost(vec!["x", "y"], 3);
+        let atmost_node = dag.set_atmost(vec!["x", "y"], 3).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 1.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atmost_node, (1, 1));
+        assume.insert(atmost_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Optimization should be feasible");
@@ -673,14 +673,14 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
-        let atleast_node = dag.set_atleast(vec!["x", "y"], 2);
+        let atleast_node = dag.set_atleast(vec!["x", "y"], 2).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 2.0);
         objective.insert("y", 3.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atleast_node, (1, 1));
+        assume.insert(atleast_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, false).unwrap(); // minimiz.unwrap()e
         assert!(solns[0].is_some(), "Minimization should be feasible");
@@ -705,7 +705,7 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 2));
         dag.set_primitive("y", (0, 2));
         dag.set_primitive("z", (0, 2));
-        let equal_node = dag.set_equal(vec!["x", "y", "z"], 2);
+        let equal_node = dag.set_equal(vec!["x", "y", "z"], 2).unwrap();
 
         let mut obj1 = HashMap::<&str, f64>::new();
         obj1.insert("x", 1.0);
@@ -717,7 +717,7 @@ mod glpk_tests {
         obj3.insert("z", 3.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&equal_node, (1, 1));
+        assume.insert(equal_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![obj1, obj2, obj3], assume, true).unwrap();
         assert!(solns[0].is_some(), "First objective should be feasible");
@@ -746,16 +746,16 @@ mod glpk_tests {
         dag.set_primitive("z", (0, 1));
         dag.set_primitive("w", (0, 1));
 
-        let and_node = dag.set_and(vec!["x", "y"]);
-        let or_node = dag.set_or(vec!["z", "w"]);
-        let imply_node = dag.set_imply(and_node, or_node);
+        let and_node = dag.set_and(vec!["x", "y"]).unwrap();
+        let or_node = dag.set_or(vec!["z", "w"]).unwrap();
+        let imply_node = dag.set_imply(and_node, or_node).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 1.0);
         objective.insert("y", 1.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&imply_node, (1, 1));
+        assume.insert(imply_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -785,14 +785,14 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
 
-        let atmost_node = dag.set_atmost(vec!["x", "y"], 4);
+        let atmost_node = dag.set_atmost(vec!["x", "y"], 4).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 2.5);
         objective.insert("y", 1.5);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atmost_node, (1, 1));
+        assume.insert(atmost_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -817,13 +817,13 @@ mod glpk_tests {
         dag.set_primitive("x", (0, 1));
 
         // Create two equal constraints: x = 1 and x = 0
-        let eq1 = dag.set_equal(vec!["x"], 1); // x = 1
-        let eq2 = dag.set_equal(vec!["x"], 0); // x = 0
-        let both = dag.set_and(vec![eq1, eq2]); // Both must be true (contradiction)
+        let eq1 = dag.set_equal(vec!["x"], 1).unwrap(); // x = 1
+        let eq2 = dag.set_equal(vec!["x"], 0).unwrap(); // x = 0
+        let both = dag.set_and(vec![eq1, eq2]).unwrap(); // Both must be true (contradiction)
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&both, (1, 1)); // Require both constraints to be satisfied
+        assume.insert(both.as_str(), (1, 1)); // Require both constraints to be satisfied
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -838,11 +838,11 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let equal_node = dag.set_equal(vec!["x", "y"], 5);
+        let equal_node = dag.set_equal(vec!["x", "y"], 5).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&equal_node, (1, 1));
+        assume.insert(equal_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -856,12 +856,12 @@ mod glpk_tests {
         // x ∧ ¬x should be false
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
-        let not_node = dag.set_not(vec!["x"]);
-        let and_node = dag.set_and(vec!["x".to_string(), not_node]);
+        let not_node = dag.set_not(vec!["x"]).unwrap();
+        let and_node = dag.set_and(vec!["x".to_string(), not_node]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&and_node, (1, 1));
+        assume.insert(and_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -876,15 +876,15 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
         dag.set_primitive("y", (0, 1));
-        let not_y = dag.set_not(vec!["y"]);
-        let imply1 = dag.set_imply("x", "y");
-        let imply2 = dag.set_imply("x", not_y);
-        let and_node = dag.set_and(vec![imply1, imply2]);
+        let not_y = dag.set_not(vec!["y"]).unwrap();
+        let imply1 = dag.set_imply("x", "y").unwrap();
+        let imply2 = dag.set_imply("x", not_y).unwrap();
+        let and_node = dag.set_and(vec![imply1, imply2]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
-        assume.insert(&and_node, (1, 1));
+        assume.insert(and_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -899,13 +899,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
-        let equal1 = dag.set_equal(vec!["x", "y"], 2);
-        let equal2 = dag.set_equal(vec!["x", "y"], 3);
-        let and_node = dag.set_and(vec![equal1, equal2]);
+        let equal1 = dag.set_equal(vec!["x", "y"], 2).unwrap();
+        let equal2 = dag.set_equal(vec!["x", "y"], 3).unwrap();
+        let and_node = dag.set_and(vec![equal1, equal2]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&and_node, (1, 1));
+        assume.insert(and_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -940,9 +940,9 @@ mod glpk_tests {
         dag.set_primitive("z", (0, 1));
         dag.set_primitive("w", (0, 1));
 
-        let and1 = dag.set_and(vec!["x", "y"]);
-        let and2 = dag.set_and(vec!["z", "w"]);
-        let or_node = dag.set_or(vec![and1, and2]);
+        let and1 = dag.set_and(vec!["x", "y"]).unwrap();
+        let and2 = dag.set_and(vec!["z", "w"]).unwrap();
+        let or_node = dag.set_or(vec![and1, and2]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
@@ -950,7 +950,7 @@ mod glpk_tests {
         assume.insert("y", (0, 0));
         assume.insert("z", (0, 0));
         assume.insert("w", (0, 0));
-        assume.insert(&or_node, (1, 1));
+        assume.insert(or_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -965,13 +965,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 5));
         dag.set_primitive("y", (0, 5));
-        let atmost_node = dag.set_atmost(vec!["x", "y"], -1);
+        let atmost_node = dag.set_atmost(vec!["x", "y"], -1).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 1.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atmost_node, (1, 1));
+        assume.insert(atmost_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -1044,13 +1044,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1000000));
         dag.set_primitive("y", (0, 1000000));
-        let atmost_node = dag.set_atmost(vec!["x", "y"], 999999);
+        let atmost_node = dag.set_atmost(vec!["x", "y"], 999999).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 1.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atmost_node, (1, 1));
+        assume.insert(atmost_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Large bounds should be feasible");
@@ -1070,13 +1070,13 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (-10, 10));
         dag.set_primitive("y", (-5, 5));
-        let atleast_node = dag.set_atleast(vec!["x", "y"], -3);
+        let atleast_node = dag.set_atleast(vec!["x", "y"], -3).unwrap();
 
         let mut objective = HashMap::<&str, f64>::new();
         objective.insert("x", 1.0);
 
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atleast_node, (1, 1));
+        assume.insert(atleast_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(solns[0].is_some(), "Negative bounds should be feasible");
@@ -1096,19 +1096,19 @@ mod glpk_tests {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
 
-        let and_single = dag.set_and(vec!["x"]);
-        let or_single = dag.set_or(vec!["x"]);
-        let xor_single = dag.set_xor(vec!["x"]);
+        let and_single = dag.set_and(vec!["x"]).unwrap();
+        let or_single = dag.set_or(vec!["x"]).unwrap();
+        let xor_single = dag.set_xor(vec!["x"]).unwrap();
         let root = dag.set_and(vec![
             and_single.clone(),
             or_single.clone(),
             xor_single.clone(),
-        ]);
+        ]).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
         assume.insert("x", (1, 1));
-        assume.insert(&root, (1, 1));
+        assume.insert(root.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -1117,9 +1117,9 @@ mod glpk_tests {
         );
         let soln = solns[0].as_ref().unwrap();
 
-        assert_eq!(*soln.get(&and_single).unwrap(), (1, 1));
-        assert_eq!(*soln.get(&or_single).unwrap(), (1, 1));
-        assert_eq!(*soln.get(&xor_single).unwrap(), (1, 1));
+        assert_eq!(*soln.get(and_single.as_str()).unwrap(), (1, 1));
+        assert_eq!(*soln.get(or_single.as_str()).unwrap(), (1, 1));
+        assert_eq!(*soln.get(xor_single.as_str()).unwrap(), (1, 1));
     }
 
     #[test]
@@ -1127,11 +1127,11 @@ mod glpk_tests {
         // Test constraint with repeated variables: x + x + x >= 3
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 2));
-        let atleast_node = dag.set_atleast(vec!["x", "x", "x"], 3);
+        let atleast_node = dag.set_atleast(vec!["x", "x", "x"], 3).unwrap();
 
         let objective = HashMap::<&str, f64>::new();
         let mut assume = HashMap::<&str, Bound>::new();
-        assume.insert(&atleast_node, (1, 1));
+        assume.insert(atleast_node.as_str(), (1, 1));
 
         let solns = Pldag::solve(&dag.sub_dag(vec![]).unwrap(), vec![objective], assume, true).unwrap();
         assert!(
@@ -1192,9 +1192,9 @@ mod glpk_tests {
     fn test_common_dag_with_xor_conjunction() {
         let mut dag = Pldag::new();
         dag.set_primitives(vec!["s1", "s2", "f1", "f2"], (0, 1));
-        let s = dag.set_xor(vec!["s1", "s2"]);
-        let f = dag.set_xor(vec!["f1", "f2"]);
-        let root = dag.set_and(vec![s, f]);
+        let s = dag.set_xor(vec!["s1", "s2"]).unwrap();
+        let f = dag.set_xor(vec!["f1", "f2"]).unwrap();
+        let root = dag.set_and(vec![s, f]).unwrap();
         let solution = Pldag::solve(
             &dag.sub_dag(vec![]).unwrap(),
             vec![HashMap::from([
@@ -1235,8 +1235,8 @@ mod glpk_tests {
     fn test_atleast_with_no_variables_will_result_to_false() {
         let mut dag = Pldag::new();
         dag.set_primitive("x", (0, 1));
-        let atleast = dag.set_atleast(Vec::<&str>::new(), 1);
-        let equiv = dag.set_equiv("x", atleast.as_str());
+        let atleast = dag.set_atleast(Vec::<&str>::new(), 1).unwrap();
+        let equiv = dag.set_equiv("x", atleast.as_str()).unwrap();
         let solutions = Pldag::solve(
             &dag.sub_dag(vec![]).unwrap(),
             vec![HashMap::new()],
@@ -1252,7 +1252,7 @@ mod glpk_tests {
         model.set_primitive("a", (0, 1));
         model.set_primitive("b", (0, 1));
         model.set_primitive("c", (0, 1));
-        let xor = model.set_atmost(vec!["a", "b", "c"], 1);
+        let xor = model.set_atmost(vec!["a", "b", "c"], 1).unwrap();
 
         let solutions = Pldag::solve(
             &model.sub_dag(vec![]).unwrap(),
@@ -1277,9 +1277,9 @@ mod glpk_tests {
         let mut model = Pldag::new();
         model.set_primitive("a", (0, 2));
         model.set_primitive("b", (0, 2));
-        let lr = model.set_equal(vec!["a", "b"], 1);
-        let rr = model.set_equal(vec!["a", "b"], 2);
-        let root = model.set_and(vec![lr, rr]);
+        let lr = model.set_equal(vec!["a", "b"], 1).unwrap();
+        let rr = model.set_equal(vec!["a", "b"], 2).unwrap();
+        let root = model.set_and(vec![lr, rr]).unwrap();
         let solutions = Pldag::solve(
             &model.sub_dag(vec![]).unwrap(),
             vec![HashMap::from([("a", 1.0), ("b", 1.0)])],
@@ -1304,7 +1304,7 @@ mod glpk_tests {
         model.set_primitive("y", (0, 2));
         model.set_primitive("z", (0, 2));
 
-        let root = model.set_equal(vec!["x", "y", "z"], 1);
+        let root = model.set_equal(vec!["x", "y", "z"], 1).unwrap();
         let solutions = Pldag::solve(
             &model.sub_dag(vec![]).unwrap(),
             vec![HashMap::from([
@@ -1365,8 +1365,8 @@ mod glpk_tests {
     #[test]
     fn test_solve_when_composites_are_tautologies_or_contradictions() {
         let mut model = Pldag::new();
-        let sand = model.set_and(Vec::<String>::new());
-        let sor = model.set_gelineq(Vec::<(&str, i32)>::new(), -5);
+        let sand = model.set_and(Vec::<String>::new()).unwrap();
+        let sor = model.set_gelineq(Vec::<(&str, i32)>::new(), -5).unwrap();
         let assume = HashMap::new();
         let solutions = Pldag::solve(
             &model.sub_dag(vec![]).unwrap(),
@@ -1382,7 +1382,7 @@ mod glpk_tests {
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
-        let atmost_taut = model.set_atmost(vec!["x", "y", "z"], 3);
+        let atmost_taut = model.set_atmost(vec!["x", "y", "z"], 3).unwrap();
         let solutions = Pldag::solve(
             &model.sub_dag(vec![]).unwrap(),
             vec![HashMap::from([(atmost_taut.as_str(), -1.0)])],

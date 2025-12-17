@@ -44,7 +44,7 @@ pub trait NodeStoreTrait: Send + Sync {
     /// Check if node exists
     fn node_exists(&self, id: &str) -> bool;
 
-    /// Get all ids matching pattern
+    /// Get all ids
     fn node_ids(&self) -> Vec<String>;
 
     /// Delete a node by id
