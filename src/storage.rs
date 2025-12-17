@@ -1,7 +1,7 @@
 use crate::pldag::Node;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// Abstract interface for key-value storage backends
 pub trait KeyValueStore: Send + Sync {
@@ -62,11 +62,11 @@ pub trait NodeStoreTrait: Send + Sync {
 }
 
 pub struct NodeStore {
-    data: Box<dyn KeyValueStore>,
+    data: Arc<dyn KeyValueStore>,
 }
 
 impl NodeStore {
-    pub fn new(store: Box<dyn KeyValueStore>) -> Self {
+    pub fn new(store: Arc<dyn KeyValueStore>) -> Self {
         Self { data: store }
     }
 

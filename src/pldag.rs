@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Represents a bound with minimum and maximum values.
 /// Used to specify the allowed range for variables and constraints.
@@ -650,7 +651,7 @@ impl Pldag {
     /// A new `Pldag` instance with no nodes
     pub fn new() -> Pldag {
         Pldag {
-            storage: Box::new(NodeStore::new(Box::new(InMemoryStore::new()))),
+            storage: Box::new(NodeStore::new(Arc::new(InMemoryStore::new()))),
         }
     }
 
