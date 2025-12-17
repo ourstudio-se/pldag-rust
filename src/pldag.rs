@@ -933,6 +933,81 @@ impl Pldag {
         self.propagate(primitives)
     }
 
+    /// Computes ranks for all nodes in the DAG.
+    ////
+    /// Ranks represent the longest distance from any root node to each node.
+    ///// # Arguments
+    /// * `dag` - mapping from node name to Node (Primitive / Composite)
+    /// 
+    /// # Returns
+    /// A HashMap of node IDs to their corresponding ranks
+    pub fn ranks(dag: &HashMap<ID, Node>) -> Result<HashMap<ID, usize>> {
+        
+        // Compute ranks given the resolved DAG
+        let children = dag.iter().map(|(node_id, node)| {
+            let child_ids = match node {
+                Node::Composite(constraint) => {
+                    constraint.coefficients.iter().map(|(child_id, _)| child_id.clone()).collect::<Vec<String>>()
+                }
+                _ => Vec::new(),
+            };
+            (node_id.clone(), child_ids)
+        }).collect::<HashMap<String, Vec<String>>>();
+
+        // Kahn topological sort
+        let mut in_degree: HashMap<String, usize> = dag.keys()
+            .map(|node_id| (node_id.clone(), 0))
+            .collect();
+
+        for node_id in dag.keys() {
+            if let Some(child_ids) = children.get(node_id) {
+                for child_id in child_ids {
+                    *in_degree.entry(child_id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut queue: Vec<String> = in_degree.iter()
+            .filter_map(|(node_id, &deg)| if deg == 0 { Some(node_id.clone()) } else { None })
+            .collect();
+        let mut topo: Vec<String> = Vec::new();
+
+        while !queue.is_empty() {
+            let node_id = queue.pop().unwrap();
+            topo.push(node_id.clone());
+            if let Some(child_ids) = children.get(&node_id) {
+                for child_id in child_ids {
+                    if let Some(deg) = in_degree.get_mut(child_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(child_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute ranks via reverse topological order
+        let mut ranks: HashMap<String, usize> = HashMap::new();
+        for node_id in topo.iter().rev() {
+            if let Some(child_ids) = children.get(node_id) {
+                if child_ids.is_empty() {
+                    ranks.insert(node_id.clone(), 0);
+                } else {
+                    let max_child_rank = child_ids.iter()
+                        .filter_map(|child_id| ranks.get(child_id))
+                        .max()
+                        .unwrap_or(&0);
+                    ranks.insert(node_id.clone(), 1 + max_child_rank);
+                }
+            } else {
+                ranks.insert(node_id.clone(), 0);
+            }
+        }
+
+        Ok(ranks)
+    }
+
     #[cfg(feature = "glpk")]
     #[cfg_attr(feature = "trace", tracing::instrument(skip_all))]
     /// Solve the supplied objectives in-process with GLPK.
@@ -1404,12 +1479,12 @@ impl Pldag {
     /// * `bias` - Constant bias term
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
+    /// The unique ID assigned to this constraint, or an error if any coefficient ID doesn't exist
     pub fn set_gelineq<K>(
         &mut self,
         coefficient_variables: impl IntoIterator<Item = (K, i32)>,
         bias: i32,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
     {
@@ -1418,6 +1493,16 @@ impl Pldag {
         for (key, value) in coefficient_variables {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
+
+        // Check that all coefficient IDs exist in storage
+        for coef_id in unique_coefficients.keys() {
+            if !self.storage.node_exists(coef_id) {
+                return Err(PldagError::NodeNotFound {
+                    node_id: coef_id.clone(),
+                });
+            }
+        }
+
         let coefficient_variables: Vec<Coefficient> = unique_coefficients
             .into_iter()
             .sorted_by(|a, b| a.0.cmp(&b.0))
@@ -1436,7 +1521,7 @@ impl Pldag {
         // Insert the constraint as a node
         self.storage.set_node(&id, Node::Composite(constraint));
 
-        id.to_string()
+        Ok(id.to_string())
     }
 
     /// Creates an "at least" constraint: sum(variables) >= value.
@@ -1446,12 +1531,12 @@ impl Pldag {
     /// * `value` - Minimum required sum
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
     pub fn set_atleast<K>(
         &mut self,
         references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
     {
@@ -1462,7 +1547,7 @@ impl Pldag {
         &mut self,
         references: impl IntoIterator<Item = K>,
         value: V,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
         V: ToString,
@@ -1483,12 +1568,12 @@ impl Pldag {
     /// * `value` - Maximum allowed sum
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
     pub fn set_atmost<K>(
         &mut self,
         references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
     {
@@ -1499,7 +1584,7 @@ impl Pldag {
         &mut self,
         references: impl IntoIterator<Item = K>,
         value: V,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
         V: ToString,
@@ -1522,18 +1607,18 @@ impl Pldag {
     /// * `value` - Required exact sum
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
     pub fn set_equal<K, I>(
         &mut self,
         references: I,
         value: i32,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
         I: IntoIterator<Item = K> + Clone,
     {
-        let ub = self.set_atleast(references.clone(), value);
-        let lb = self.set_atmost(references, value);
+        let ub = self.set_atleast(references.clone(), value)?;
+        let lb = self.set_atmost(references, value)?;
         self.set_and(vec![ub, lb])
     }
 
@@ -1541,14 +1626,14 @@ impl Pldag {
         &mut self,
         references: I,
         value: V,
-    ) -> ID
+    ) -> Result<ID>
     where
         K: ToString,
         V: ToString,
         I: IntoIterator<Item = K> + Clone,
     {
-        let ub = self.set_atleast_ref(references.clone(), value.to_string());
-        let lb = self.set_atmost_ref(references, value);
+        let ub = self.set_atleast_ref(references.clone(), value.to_string())?;
+        let lb = self.set_atmost_ref(references, value)?;
         self.set_and(vec![ub, lb])
     }
 
@@ -1561,8 +1646,8 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to AND together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -1581,8 +1666,8 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to OR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -1600,8 +1685,8 @@ impl Pldag {
     /// * `references` - Variable IDs to make optional
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_optional<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_optional<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -1619,8 +1704,8 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to NAND together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -1642,8 +1727,8 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to NOR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -1661,8 +1746,8 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to negate
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -1680,15 +1765,15 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to XOR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()));
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1);
+        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()))?;
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1)?;
         self.set_and(vec![atleast, atmost])
     }
 
@@ -1701,15 +1786,15 @@ impl Pldag {
     /// * `references` - Iterator of variable IDs to XNOR together
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2);
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0);
+        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2)?;
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)?;
         self.set_or(vec![atleast, atmost])
     }
 
@@ -1723,13 +1808,13 @@ impl Pldag {
     /// * `consequence` - The consequence variable ID
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> Result<ID>
     where
         C: ToString,
         Q: ToString,
     {
-        let not_condition = self.set_not(vec![condition.to_string()]);
+        let not_condition = self.set_not(vec![condition.to_string()])?;
         self.set_or(vec![not_condition, consequence.to_string()])
     }
 
@@ -1743,8 +1828,8 @@ impl Pldag {
     /// * `rhs` - The right-hand side variable ID
     ///
     /// # Returns
-    /// The unique ID assigned to this constraint
-    pub fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> ID
+    /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
+    pub fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> Result<ID>
     where
         L: ToString,
         R: ToString,
@@ -1753,8 +1838,8 @@ impl Pldag {
         let lhs_str = lhs.to_string();
         let rhs_str = rhs.to_string();
 
-        let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()]);
-        let imply_rl = self.set_not(vec![rhs_str, lhs_str]);
+        let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()])?;
+        let imply_rl = self.set_not(vec![rhs_str, lhs_str])?;
         self.set_or(vec![imply_lr, imply_rl])
     }
 }
@@ -1850,7 +1935,7 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
-        let root = model.set_and(vec!["x", "y"]);
+        let root = model.set_and(vec!["x", "y"]).unwrap();
 
         let result = model.propagate_default().unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
@@ -1867,7 +1952,7 @@ mod tests {
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]);
+        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
         let result = model.propagate_default().unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
@@ -1902,7 +1987,7 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("a".into(), (0, 1));
         model.set_primitive("b".into(), (0, 1));
-        let or_root = model.set_or(vec!["a", "b"]);
+        let or_root = model.set_or(vec!["a", "b"]).unwrap();
 
         // No assignment: both inputs full [0,1], output [0,1]
         let res = model.propagate_default().unwrap();
@@ -1935,7 +2020,7 @@ mod tests {
     fn test_propagate_not_gate() {
         let mut model = Pldag::new();
         model.set_primitive("p".into(), (0, 1));
-        let not_root = model.set_not(vec!["p"]);
+        let not_root = model.set_not(vec!["p"]).unwrap();
 
         // no assignment ⇒ [0,1]
         let res = model.propagate_default().unwrap();
@@ -1960,7 +2045,7 @@ mod tests {
         let mut m = Pldag::new();
         m.set_primitive("x".into(), (0, 1));
         m.set_primitive("y", (0, 1));
-        let root = m.set_and(vec!["x", "y"]);
+        let root = m.set_and(vec!["x", "y"]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
@@ -1971,7 +2056,7 @@ mod tests {
         m.set_primitive("a".into(), (0, 1));
         m.set_primitive("b".into(), (0, 1));
         m.set_primitive("c".into(), (0, 1));
-        let root = m.set_or(vec!["a", "b", "c"]);
+        let root = m.set_or(vec!["a", "b", "c"]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
@@ -1980,7 +2065,7 @@ mod tests {
     fn test_to_polyhedron_not() {
         let mut m = Pldag::new();
         m.set_primitive("p".into(), (0, 1));
-        let root = m.set_not(vec!["p"]);
+        let root = m.set_not(vec!["p"]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
@@ -1991,7 +2076,7 @@ mod tests {
         m.set_primitive("x".into(), (0, 1));
         m.set_primitive("y", (0, 1));
         m.set_primitive("z".into(), (0, 1));
-        let root = m.set_xor(vec!["x", "y", "z"]);
+        let root = m.set_xor(vec!["x", "y", "z"]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
@@ -2005,9 +2090,9 @@ mod tests {
         m.set_primitive("y", (0, 1));
         m.set_primitive("z".into(), (0, 1));
 
-        let w = m.set_and(vec!["x", "y"]);
-        let nz = m.set_not(vec!["z"]);
-        let v = m.set_or(vec![w.clone(), nz.clone()]);
+        let w = m.set_and(vec!["x", "y"]).unwrap();
+        let nz = m.set_not(vec!["z"]).unwrap();
+        let v = m.set_or(vec![w.clone(), nz.clone()]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &v);
     }
@@ -2021,8 +2106,8 @@ mod tests {
         model.set_primitive("y", (0, 1));
         model.set_primitive("z".into(), (0, 1));
 
-        let w = model.set_and(vec!["x", "y"]);
-        let v = model.set_xor(vec![w.clone(), "z".into()]);
+        let w = model.set_and(vec!["x", "y"]).unwrap();
+        let v = model.set_xor(vec![w.clone(), "z".into()]).unwrap();
 
         // no assignment: everything [0,1]
         let res = model.propagate_default().unwrap();
@@ -2099,14 +2184,14 @@ mod tests {
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]);
+        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
         let polyhedron: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
         let mut model = Pldag::new();
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
-        let root = model.set_and(vec!["x", "y"]);
+        let root = model.set_and(vec!["x", "y"]).unwrap();
         let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
 
@@ -2114,7 +2199,7 @@ mod tests {
         model.set_primitive("x", (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]);
+        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
         let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&model, &polyhedron, &root);
     }
@@ -2126,7 +2211,7 @@ mod tests {
         {
             let mut m = Pldag::new();
             m.set_primitive("x".into(), (0, 1));
-            let root = m.set_and::<&str>(vec!["x"]);
+            let root = m.set_and::<&str>(vec!["x"]).unwrap();
             let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
@@ -2134,7 +2219,7 @@ mod tests {
         {
             let mut m = Pldag::new();
             m.set_primitive("y", (0, 1));
-            let root = m.set_or(vec!["y"]);
+            let root = m.set_or(vec!["y"]).unwrap();
             let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
@@ -2142,7 +2227,7 @@ mod tests {
         {
             let mut m = Pldag::new();
             m.set_primitive("z".into(), (0, 1));
-            let root = m.set_xor(vec!["z"]);
+            let root = m.set_xor(vec!["z"]).unwrap();
             let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
             evaluate_model_polyhedron(&m, &poly, &root);
         }
@@ -2153,7 +2238,7 @@ mod tests {
     fn test_to_polyhedron_duplicate_operands_and() {
         let mut m = Pldag::new();
         m.set_primitive("x".into(), (0, 1));
-        let root = m.set_and(vec!["x", "x"]);
+        let root = m.set_and(vec!["x", "x"]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
@@ -2175,10 +2260,10 @@ mod tests {
         let c = "c";
         let d = "d";
 
-        let w1 = m.set_and(vec![a, b]);
-        let w2 = m.set_or(vec![w1.clone(), c.to_string()]);
-        let w3 = m.set_xor(vec![w2.clone(), d.to_string()]);
-        let root = m.set_not(vec![w3.clone()]);
+        let w1 = m.set_and(vec![a, b]).unwrap();
+        let w2 = m.set_or(vec![w1.clone(), c.to_string()]).unwrap();
+        let w3 = m.set_xor(vec![w2.clone(), d.to_string()]).unwrap();
+        let root = m.set_not(vec![w3.clone()]).unwrap();
         let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
         evaluate_model_polyhedron(&m, &poly, &root);
     }
@@ -2215,7 +2300,7 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
-        let equiv = model.set_equiv("p", "q");
+        let equiv = model.set_equiv("p", "q").unwrap();
         let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
@@ -2245,7 +2330,7 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
-        let equiv = model.set_imply("p", "q");
+        let equiv = model.set_imply("p", "q").unwrap();
         let propagated = model.propagate_default().unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
@@ -2300,10 +2385,8 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
-        model.set_and(vec!["p", "q", "r"]); // 'r' does not exist
-        let mut interp = IndexMap::<&str, Bound>::new();
-        interp.insert("q".into(), (0, 1));
-        let result = model.propagate(interp);
+        // set_and will return an error when 'r' does not exist
+        let result = model.set_and(vec!["p", "q", "r"]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
@@ -2314,8 +2397,8 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
-        let root = model.set_and(vec!["p", "q", "r"]);
-        let result = model.sub_dag(vec![root]);
+        // set_and will return an error when 'r' does not exist
+        let result = model.set_and(vec!["p", "q", "r"]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
@@ -2326,8 +2409,8 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         model.set_primitive("q", (0, 1));
-        let root = model.set_and(vec!["p", "q", "r"]);
-        let result = model.sub_dag(vec![root]);
+        // set_and will return an error when 'r' does not exist
+        let result = model.set_and(vec!["p", "q", "r"]);
         assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
@@ -2552,7 +2635,7 @@ mod tests {
         model.set_primitive("x".into(), (0, 1));
         model.set_primitive("y", (0, 1));
         model.set_primitive("z".into(), (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z"]);
+        let root = model.set_xor(vec!["x", "y", "z"]).unwrap();
         let sub_dag = model.sub_dag(vec![root.clone()]).unwrap();
         assert!(sub_dag.get(&root).is_some());
     }
@@ -2562,7 +2645,7 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("a".into(), (0, 1));
         model.set_primitive("b".into(), (0, 1));
-        let and_node = model.set_and(vec!["a", "b"]);
+        let and_node = model.set_and(vec!["a", "b"]).unwrap();
         let delete_result = model.delete_node(&and_node);
         assert!(delete_result.is_ok());
         assert!(model.get_node(&and_node).is_none());
@@ -2586,9 +2669,50 @@ mod tests {
         let mut model = Pldag::new();
         model.set_primitive("a".into(), (0, 1));
         model.set_primitive("b".into(), (0, 1));
-        let and_node = model.set_and(vec!["a", "b"]);
-        model.set_or(vec![and_node.clone(), "a".into()]);
+        let and_node = model.set_and(vec!["a", "b"]).unwrap();
+        model.set_or(vec![and_node.clone(), "a".into()]).unwrap();
         let delete_result = model.delete_node(&and_node);
         assert!(delete_result.is_err());
+    }
+
+    #[test]
+    fn test_compute_ranks() {
+
+        // Simple case: a and b are rank 0, and (a AND b) is rank 1
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("b".into(), (0, 1));
+        let and_node = model.set_and(vec!["a", "b"]).unwrap();
+        model.set_or(vec![and_node.clone(), "a".into()]).unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        assert_eq!(ranks.get("a"), Some(&0));
+        assert_eq!(ranks.get("b"), Some(&0));
+        assert_eq!(ranks.get(&and_node), Some(&1));
+
+        // More complex case 1
+        let mut model = Pldag::new();
+        model.set_primitive("x".into(), (0, 1));
+        model.set_primitive("y".into(), (0, 1));
+        let and_node = model.set_and(vec!["x", "y"]).unwrap();
+        let not_node = model.set_not(vec![and_node.clone()]).unwrap();
+        model.set_xor(vec![not_node.clone(), "x".into()]).unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        assert_eq!(ranks.get("x"), Some(&0));
+        assert_eq!(ranks.get("y"), Some(&0));
+        assert_eq!(ranks.get(&and_node), Some(&1));
+        assert_eq!(ranks.get(&not_node), Some(&2));
+
+        // More complex case 2
+        let mut model = Pldag::new();
+        model.set_primitive("p".into(), (0, 1));
+        model.set_primitive("q".into(), (0, 1));
+        let equiv_node = model.set_equiv("p", "q").unwrap();
+        let imply_node = model.set_imply("p", "q").unwrap();
+        model.set_or(vec![equiv_node.clone(), imply_node.clone()]).unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        assert_eq!(ranks.get("p"), Some(&0));
+        assert_eq!(ranks.get("q"), Some(&0));
+        assert_eq!(ranks.get(&equiv_node), Some(&2));
+        assert_eq!(ranks.get(&imply_node), Some(&2));
     }
 }

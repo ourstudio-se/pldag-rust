@@ -13,7 +13,7 @@ fn main() {
     pldag.set_primitive("z", (0, 1));
 
     // A reference ID is returned
-    let root = pldag.set_or(vec!["x", "y", "z"]);
+    let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
 
     // 1. Validate a combination:
     let mut inputs: IndexMap<&str, Bound> = IndexMap::new();
@@ -38,7 +38,7 @@ fn main() {
     pldag.set_primitive("x", (0, 1));
     pldag.set_primitive("y", (0, 1));
     pldag.set_primitive("z", (0, 1));
-    let root = pldag.set_or(vec!["x", "y", "z"]);
+    let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
 
     // 1. Validate a combination
     let validated = pldag.propagate_default().unwrap();
