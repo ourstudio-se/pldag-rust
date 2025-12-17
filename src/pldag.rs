@@ -933,6 +933,81 @@ impl Pldag {
         self.propagate(primitives)
     }
 
+    /// Computes ranks for all nodes in the DAG.
+    ////
+    /// Ranks represent the longest distance from any root node to each node.
+    ///// # Arguments
+    /// * `dag` - mapping from node name to Node (Primitive / Composite)
+    /// 
+    /// # Returns
+    /// A HashMap of node IDs to their corresponding ranks
+    pub fn ranks(dag: &HashMap<ID, Node>) -> Result<HashMap<ID, usize>> {
+        
+        // Compute ranks given the resolved DAG
+        let children = dag.iter().map(|(node_id, node)| {
+            let child_ids = match node {
+                Node::Composite(constraint) => {
+                    constraint.coefficients.iter().map(|(child_id, _)| child_id.clone()).collect::<Vec<String>>()
+                }
+                _ => Vec::new(),
+            };
+            (node_id.clone(), child_ids)
+        }).collect::<HashMap<String, Vec<String>>>();
+
+        // Kahn topological sort
+        let mut in_degree: HashMap<String, usize> = dag.keys()
+            .map(|node_id| (node_id.clone(), 0))
+            .collect();
+
+        for node_id in dag.keys() {
+            if let Some(child_ids) = children.get(node_id) {
+                for child_id in child_ids {
+                    *in_degree.entry(child_id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut queue: Vec<String> = in_degree.iter()
+            .filter_map(|(node_id, &deg)| if deg == 0 { Some(node_id.clone()) } else { None })
+            .collect();
+        let mut topo: Vec<String> = Vec::new();
+
+        while !queue.is_empty() {
+            let node_id = queue.pop().unwrap();
+            topo.push(node_id.clone());
+            if let Some(child_ids) = children.get(&node_id) {
+                for child_id in child_ids {
+                    if let Some(deg) = in_degree.get_mut(child_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(child_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute ranks via reverse topological order
+        let mut ranks: HashMap<String, usize> = HashMap::new();
+        for node_id in topo.iter().rev() {
+            if let Some(child_ids) = children.get(node_id) {
+                if child_ids.is_empty() {
+                    ranks.insert(node_id.clone(), 0);
+                } else {
+                    let max_child_rank = child_ids.iter()
+                        .filter_map(|child_id| ranks.get(child_id))
+                        .max()
+                        .unwrap_or(&0);
+                    ranks.insert(node_id.clone(), 1 + max_child_rank);
+                }
+            } else {
+                ranks.insert(node_id.clone(), 0);
+            }
+        }
+
+        Ok(ranks)
+    }
+
     #[cfg(feature = "glpk")]
     #[cfg_attr(feature = "trace", tracing::instrument(skip_all))]
     /// Solve the supplied objectives in-process with GLPK.
@@ -2598,5 +2673,46 @@ mod tests {
         model.set_or(vec![and_node.clone(), "a".into()]).unwrap();
         let delete_result = model.delete_node(&and_node);
         assert!(delete_result.is_err());
+    }
+
+    #[test]
+    fn test_compute_ranks() {
+
+        // Simple case: a and b are rank 0, and (a AND b) is rank 1
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("b".into(), (0, 1));
+        let and_node = model.set_and(vec!["a", "b"]).unwrap();
+        model.set_or(vec![and_node.clone(), "a".into()]).unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        assert_eq!(ranks.get("a"), Some(&0));
+        assert_eq!(ranks.get("b"), Some(&0));
+        assert_eq!(ranks.get(&and_node), Some(&1));
+
+        // More complex case 1
+        let mut model = Pldag::new();
+        model.set_primitive("x".into(), (0, 1));
+        model.set_primitive("y".into(), (0, 1));
+        let and_node = model.set_and(vec!["x", "y"]).unwrap();
+        let not_node = model.set_not(vec![and_node.clone()]).unwrap();
+        model.set_xor(vec![not_node.clone(), "x".into()]).unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        assert_eq!(ranks.get("x"), Some(&0));
+        assert_eq!(ranks.get("y"), Some(&0));
+        assert_eq!(ranks.get(&and_node), Some(&1));
+        assert_eq!(ranks.get(&not_node), Some(&2));
+
+        // More complex case 2
+        let mut model = Pldag::new();
+        model.set_primitive("p".into(), (0, 1));
+        model.set_primitive("q".into(), (0, 1));
+        let equiv_node = model.set_equiv("p", "q").unwrap();
+        let imply_node = model.set_imply("p", "q").unwrap();
+        model.set_or(vec![equiv_node.clone(), imply_node.clone()]).unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        assert_eq!(ranks.get("p"), Some(&0));
+        assert_eq!(ranks.get("q"), Some(&0));
+        assert_eq!(ranks.get(&equiv_node), Some(&2));
+        assert_eq!(ranks.get(&imply_node), Some(&2));
     }
 }
