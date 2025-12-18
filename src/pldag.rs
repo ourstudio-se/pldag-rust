@@ -683,7 +683,7 @@ impl Pldag {
                     count *= size;
                 }
                 // Composite nodes do not contribute to count, only restricts from the primitives
-                Node::Composite(_) => continue, 
+                Node::Composite(_) => continue,
             }
         }
 
@@ -939,54 +939,13 @@ impl Pldag {
     /// Ranks represent the longest distance from any root node to each node.
     ///// # Arguments
     /// * `dag` - mapping from node name to Node (Primitive / Composite)
-    /// 
+    ///
     /// # Returns
     /// A HashMap of node IDs to their corresponding ranks
     pub fn ranks(dag: &HashMap<ID, Node>) -> Result<HashMap<ID, usize>> {
-        
         // Compute ranks given the resolved DAG
-        let children = dag.iter().map(|(node_id, node)| {
-            let child_ids = match node {
-                Node::Composite(constraint) => {
-                    constraint.coefficients.iter().map(|(child_id, _)| child_id.clone()).collect::<Vec<String>>()
-                }
-                _ => Vec::new(),
-            };
-            (node_id.clone(), child_ids)
-        }).collect::<HashMap<String, Vec<String>>>();
-
-        // Kahn topological sort
-        let mut in_degree: HashMap<String, usize> = dag.keys()
-            .map(|node_id| (node_id.clone(), 0))
-            .collect();
-
-        for node_id in dag.keys() {
-            if let Some(child_ids) = children.get(node_id) {
-                for child_id in child_ids {
-                    *in_degree.entry(child_id.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-
-        let mut queue: Vec<String> = in_degree.iter()
-            .filter_map(|(node_id, &deg)| if deg == 0 { Some(node_id.clone()) } else { None })
-            .collect();
-        let mut topo: Vec<String> = Vec::new();
-
-        while !queue.is_empty() {
-            let node_id = queue.pop().unwrap();
-            topo.push(node_id.clone());
-            if let Some(child_ids) = children.get(&node_id) {
-                for child_id in child_ids {
-                    if let Some(deg) = in_degree.get_mut(child_id) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push(child_id.clone());
-                        }
-                    }
-                }
-            }
-        }
+        let children = Self::children(dag);
+        let topo = Self::topological_sort(&dag, &children)?;
 
         // Compute ranks via reverse topological order
         let mut ranks: HashMap<String, usize> = HashMap::new();
@@ -995,7 +954,8 @@ impl Pldag {
                 if child_ids.is_empty() {
                     ranks.insert(node_id.clone(), 0);
                 } else {
-                    let max_child_rank = child_ids.iter()
+                    let max_child_rank = child_ids
+                        .iter()
                         .filter_map(|child_id| ranks.get(child_id))
                         .max()
                         .unwrap_or(&0);
@@ -1007,6 +967,68 @@ impl Pldag {
         }
 
         Ok(ranks)
+    }
+
+    pub fn topological_sort(
+        dag: &HashMap<ID, Node>,
+        child_map: &HashMap<ID, Vec<ID>>,
+    ) -> Result<Vec<ID>> {
+        let mut in_degree: HashMap<String, usize> =
+            dag.keys().map(|node_id| (node_id.clone(), 0)).collect();
+
+        for node_id in dag.keys() {
+            if let Some(child_ids) = child_map.get(node_id) {
+                for child_id in child_ids {
+                    *in_degree.entry(child_id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut queue: Vec<String> = in_degree
+            .iter()
+            .filter_map(|(node_id, &deg)| {
+                if deg == 0 {
+                    Some(node_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut result: Vec<String> = Vec::new();
+
+        while !queue.is_empty() {
+            let node_id = queue.pop().unwrap();
+            result.push(node_id.clone());
+            if let Some(child_ids) = child_map.get(&node_id) {
+                for child_id in child_ids {
+                    if let Some(deg) = in_degree.get_mut(child_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(child_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        debug_assert_eq!(result.len(), dag.len());
+        Ok(result)
+    }
+
+    pub fn children(dag: &HashMap<ID, Node>) -> HashMap<ID, Vec<ID>> {
+        dag.iter()
+            .map(|(node_id, node)| {
+                let child_ids = match node {
+                    Node::Composite(constraint) => constraint
+                        .coefficients
+                        .iter()
+                        .map(|(child_id, _)| child_id.clone())
+                        .collect::<Vec<String>>(),
+                    _ => Vec::new(),
+                };
+                (node_id.clone(), child_ids)
+            })
+            .collect()
     }
 
     #[cfg(feature = "glpk")]
