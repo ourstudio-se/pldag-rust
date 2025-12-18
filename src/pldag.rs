@@ -944,13 +944,13 @@ impl Pldag {
     /// A HashMap of node IDs to their corresponding ranks
     pub fn ranks(dag: &HashMap<ID, Node>) -> Result<HashMap<ID, usize>> {
         // Compute ranks given the resolved DAG
-        let children = Self::children(dag);
-        let topo = Self::topological_sort(&dag, &children)?;
+        let dependencies = Self::dependency_map(dag);
+        let topo = Self::topological_sort(&dag, &dependencies)?;
 
         // Compute ranks via reverse topological order
         let mut ranks: HashMap<String, usize> = HashMap::new();
         for node_id in topo.iter().rev() {
-            if let Some(child_ids) = children.get(node_id) {
+            if let Some(child_ids) = dependencies.get(node_id) {
                 if child_ids.is_empty() {
                     ranks.insert(node_id.clone(), 0);
                 } else {
@@ -971,13 +971,13 @@ impl Pldag {
 
     pub fn topological_sort(
         dag: &HashMap<ID, Node>,
-        child_map: &HashMap<ID, Vec<ID>>,
+        dependency_map: &HashMap<ID, Vec<ID>>,
     ) -> Result<Vec<ID>> {
         let mut in_degree: HashMap<String, usize> =
             dag.keys().map(|node_id| (node_id.clone(), 0)).collect();
 
         for node_id in dag.keys() {
-            if let Some(child_ids) = child_map.get(node_id) {
+            if let Some(child_ids) = dependency_map.get(node_id) {
                 for child_id in child_ids {
                     *in_degree.entry(child_id.clone()).or_insert(0) += 1;
                 }
@@ -999,7 +999,7 @@ impl Pldag {
         while !queue.is_empty() {
             let node_id = queue.pop().unwrap();
             result.push(node_id.clone());
-            if let Some(child_ids) = child_map.get(&node_id) {
+            if let Some(child_ids) = dependency_map.get(&node_id) {
                 for child_id in child_ids {
                     if let Some(deg) = in_degree.get_mut(child_id) {
                         *deg -= 1;
@@ -1015,7 +1015,7 @@ impl Pldag {
         Ok(result)
     }
 
-    pub fn children(dag: &HashMap<ID, Node>) -> HashMap<ID, Vec<ID>> {
+    pub fn dependency_map(dag: &HashMap<ID, Node>) -> HashMap<ID, Vec<ID>> {
         dag.iter()
             .map(|(node_id, node)| {
                 let child_ids = match node {
