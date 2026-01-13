@@ -1,6 +1,6 @@
 [package]
 name        = "pldag"
-version     = "4.0.1"
+version     = "4.0.2"
 edition     = "2021"
 description = "A DAG-based combinatorial-model framework with optional GLPK solving back-end."
 license     = "MIT"
@@ -23,7 +23,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 # 2. GLPK FFI crate — *only* compiled if the `glpk` feature
 #    is enabled further below
 # ───────────────────────────────────────────────────────────
-glpk-rust = { version = "0.1.11", optional = true, default-features = false }
+glpk-rust = { version = "0.1.12", optional = true, default-features = false }
 tracing = { version = "0.1", optional = true, features = ["attributes"], default-features = false}
 
 # ───────────────────────────────────────────────────────────
