@@ -3211,6 +3211,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_delete_composite_then_delete_primitives_should_succeed() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("a".into(), (0, 1)).await;
+        let _ = model.set_primitive("b".into(), (0, 1)).await;
+        let and_node = model.set_and(vec!["a", "b"]).await.unwrap();
+        let delete_result_composite = model.delete_node(&and_node).await;
+        let delete_result_a = model.delete_node(&"a").await;
+        let delete_result_b = model.delete_node(&"b").await;
+        assert!(delete_result_composite.is_ok());
+        assert!(delete_result_a.is_ok());
+        assert!(delete_result_b.is_ok());
+        assert!(model.get_node(&and_node).await.unwrap().is_none());
+        assert!(model.get_node(&"a").await.unwrap().is_none());
+        assert!(model.get_node(&"b").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn test_delete_node_should_fail_for_still_having_references() {
         let model = Pldag::new();
         let _ = model.set_primitive("a", (0, 1)).await;
