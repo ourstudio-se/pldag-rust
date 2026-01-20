@@ -149,6 +149,23 @@ impl NodeStoreTrait for NodeStore {
     }
 
     fn delete(&self, id: &str) {
+        // Remove outgoing references for nodes that points to this node
+        let incoming_refs = self.get_children_ids(&vec![id.to_string()]);
+        match incoming_refs.get(id) {
+            Some(ids) => {
+                let mut coefficient_current_references: HashMap<String, Vec<String>> = self.get_parent_ids(&ids);
+                for (coef_id, current_references) in coefficient_current_references.iter_mut() {
+                    if current_references.contains(&id.to_string()) {
+                        current_references.retain(|x| x != id);
+                        self.data.set(
+                            &format!("__outgoing__{}", coef_id),
+                            serde_json::to_value(current_references).unwrap(),
+                        );
+                    }
+                }        
+            },
+            None => (),
+        }
         self.data.delete(id);
     }
 
