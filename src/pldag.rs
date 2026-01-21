@@ -2678,6 +2678,23 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_composite_then_delete_primitives_should_succeed() {
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("b".into(), (0, 1));
+        let and_node = model.set_and(vec!["a", "b"]).unwrap();
+        let delete_result_composite = model.delete_node(&and_node);
+        let delete_result_a = model.delete_node(&"a");
+        let delete_result_b = model.delete_node(&"b");
+        assert!(delete_result_composite.is_ok());
+        assert!(delete_result_a.is_ok());
+        assert!(delete_result_b.is_ok());
+        assert!(model.get_node(&and_node).is_none());
+        assert!(model.get_node(&"a").is_none());
+        assert!(model.get_node(&"b").is_none());
+    }
+
+    #[test]
     fn test_delete_primitives_should_succeed() {
         let mut model = Pldag::new();
         model.set_primitive("a".into(), (0, 1));

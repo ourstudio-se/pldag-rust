@@ -149,7 +149,27 @@ impl NodeStoreTrait for NodeStore {
     }
 
     fn delete(&self, id: &str) {
+        // Remove this node from parent lists of nodes it points to
+        let children = self.get_children_ids(&vec![id.to_string()]);
+        match children.get(id) {
+            Some(ids) => {
+                let mut coefficient_current_references: HashMap<String, Vec<String>> = self.get_parent_ids(&ids);
+                for (coef_id, current_references) in coefficient_current_references.iter_mut() {
+                    if current_references.contains(&id.to_string()) {
+                        current_references.retain(|x| x != id);
+                        self.data.set(
+                            &format!("__outgoing__{}", coef_id),
+                            serde_json::to_value(current_references)
+                                .expect("failed to serialize current_references for __outgoing__ node references"),
+                        );
+                    }
+                }
+            },
+            None => (),
+        }
         self.data.delete(id);
+        // Also remove this node's own outgoing references entry to prevent stale data
+        self.data.delete(&format!("__outgoing__{}", id));
     }
 
     fn get_parent_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>> {
