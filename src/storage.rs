@@ -159,7 +159,8 @@ impl NodeStoreTrait for NodeStore {
                         current_references.retain(|x| x != id);
                         self.data.set(
                             &format!("__outgoing__{}", coef_id),
-                            serde_json::to_value(current_references).unwrap(),
+                            serde_json::to_value(current_references)
+                                .expect("failed to serialize current_references for __outgoing__ node references"),
                         );
                     }
                 }
