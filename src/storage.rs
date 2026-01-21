@@ -162,7 +162,7 @@ impl NodeStoreTrait for NodeStore {
                             serde_json::to_value(current_references).unwrap(),
                         );
                     }
-                }        
+                }
             },
             None => (),
         }
