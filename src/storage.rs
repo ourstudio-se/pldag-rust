@@ -149,7 +149,7 @@ impl NodeStoreTrait for NodeStore {
     }
 
     fn delete(&self, id: &str) {
-        // Remove outgoing references for nodes that points to this node
+        // Remove this node from parent lists of nodes it points to
         let incoming_refs = self.get_children_ids(&vec![id.to_string()]);
         match incoming_refs.get(id) {
             Some(ids) => {
