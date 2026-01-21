@@ -168,6 +168,8 @@ impl NodeStoreTrait for NodeStore {
             None => (),
         }
         self.data.delete(id);
+        // Also remove this node's own outgoing references entry to prevent stale data
+        self.data.delete(&format!("__outgoing__{}", id));
     }
 
     fn get_parent_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>> {
