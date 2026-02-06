@@ -24,13 +24,13 @@ fn main() {
 
     // If we however fix x to be zero, then we can check the result
     inputs.insert("x", (0, 0));
-    let revalidated = pldag.propagate(inputs.clone()).unwrap();
+    let revalidated = pldag.propagate(inputs.clone(), None).unwrap();
     println!("Root valid? {}", *revalidated.get(&root).unwrap() == (1, 1)); // This will be false
 
     // However, fixing y and z to 1 will yield the root node to be true (since the root will be true if any of x, y or z is true).
     inputs.insert("y", (1, 1));
     inputs.insert("z", (1, 1));
-    let revalidated = pldag.propagate(inputs.clone()).unwrap();
+    let revalidated = pldag.propagate(inputs.clone(), None).unwrap();
     println!("Root valid? {}", *revalidated.get(&root).unwrap() == (1, 1)); // This will be true
 
     // Build a simple OR‑of‑three model

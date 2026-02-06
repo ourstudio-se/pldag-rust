@@ -783,6 +783,217 @@ impl Pldag {
         Ok(values)
     }
 
+    pub fn reduce(
+        dag: &HashMap<ID, Node>,
+        fixed: &HashMap<String, i32>,
+    ) -> Result<HashMap<ID, Node>> {
+        let mut reduced: HashMap<ID, Node> = HashMap::new();
+
+        'nodes: for (node_id, node) in dag.iter() {
+            // Drop nodes that are fixed
+            let node_key = node_id.to_string(); // assumes this matches `fixed` keys
+            if fixed.contains_key(&node_key) {
+                continue 'nodes;
+            }
+
+            match node {
+                Node::Primitive(bound) => {
+                    reduced.insert(node_id.clone(), Node::Primitive(*bound));
+                }
+
+                Node::Composite(constraint) => {
+                    let mut new_coefficients: Vec<(String, i32)> = Vec::new();
+                    let mut new_bias = constraint.bias;
+
+                    for (var_name, coeff) in constraint.coefficients.iter() {
+                        if let Some(&fixed_val) = fixed.get(var_name) {
+                            let contribution = bound_multiply(*coeff, (fixed_val, fixed_val));
+                            new_bias = bound_add(new_bias, contribution);
+                        } else {
+                            new_coefficients.push((var_name.clone(), *coeff));
+                        }
+                    }
+
+                    // If constant after substitution, drop it too (it's fixed now).
+                    if new_coefficients.is_empty() {
+                        let (lb, ub) = new_bias;
+                        // constraint is bias >= 0
+                        if lb >= 0 || ub < 0 {
+                            continue 'nodes;
+                        }
+                        // If ambiguous interval, keep it (rare; depends on your bias type).
+                    }
+
+                    reduced.insert(
+                        node_id.clone(),
+                        Node::Composite(Constraint {
+                            coefficients: new_coefficients,
+                            bias: new_bias,
+                        }),
+                    );
+                }
+            }
+        }
+
+        Ok(reduced)
+    }
+
+    /// Static propagation function that works on any DAG without requiring storage.
+    ///
+    /// This is useful when you need to propagate bounds through a sub-DAG or
+    /// a DAG that is not stored in the main Pldag storage.
+    ///
+    /// # Arguments
+    /// * `dag` - HashMap mapping node IDs to their corresponding nodes
+    /// * `assignments` - Initial assignment of bounds to variables
+    ///
+    /// # Returns
+    /// Complete assignment including bounds for all reachable nodes
+    pub fn propagate_dag<K>(
+        dag: &HashMap<ID, Node>,
+        assignments: impl IntoIterator<Item = (K, Bound)>,
+    ) -> Result<Assignment>
+    where
+        K: ToString,
+    {
+        // Build reverse dependency map (parent_ids) from the dag
+        let mut parent_ids: HashMap<String, Vec<String>> = HashMap::new();
+        for (node_id, node) in dag.iter() {
+            if let Node::Composite(constraint) = node {
+                for (input_id, _) in constraint.coefficients.iter() {
+                    parent_ids
+                        .entry(input_id.clone())
+                        .or_insert_with(Vec::new)
+                        .push(node_id.clone());
+                }
+            }
+        }
+
+        // Convert assignments into IndexMap<String, Bound>
+        let assignments_map: IndexMap<String, Bound> = assignments
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        // Initialize results with the provided assignments
+        let mut results: IndexMap<String, Bound> = IndexMap::new();
+
+        // Extract all keys from the initial assignments
+        let mut queue: Vec<String> = assignments_map.keys().cloned().collect();
+
+        // Keep track of visited nodes to avoid reprocessing
+        let mut visited = HashSet::new();
+
+        while !queue.is_empty() {
+            let mut next_batch: Vec<String> = Vec::new();
+            let mut processed_this_batch: Vec<String> = Vec::new();
+
+            // Loop over all nodes in queue
+            while let Some(node_id) = queue.pop() {
+                if visited.contains(&node_id) {
+                    continue; // Already processed this node
+                }
+
+                let node = match dag.get(&node_id) {
+                    Some(n) => n,
+                    None => {
+                        return Err(PldagError::NodeNotFound {
+                            node_id: node_id.clone(),
+                        })
+                    }
+                };
+
+                match node {
+                    Node::Primitive(primitive) => {
+                        // If this node is in the initial assignments, use that value
+                        if let Some(bound) = assignments_map.get(&node_id) {
+                            // However, if the assigned bound is looser than the primitive's inherent bound,
+                            // we return an error since it is not allowed.
+                            if bound.0 < primitive.0 || bound.1 > primitive.1 {
+                                return Err(PldagError::NodeOutOfBounds {
+                                    node_id: node_id.clone(),
+                                    got_bound: *bound,
+                                    expected_bound: *primitive,
+                                });
+                            }
+
+                            results.insert(node_id.to_string(), *bound);
+                        } else {
+                            // Otherwise, use the primitive's inherent bound
+                            results.insert(node_id.to_string(), *primitive);
+                        }
+                        visited.insert(node_id.clone());
+                        processed_this_batch.push(node_id.clone());
+                    }
+                    Node::Composite(constraint) => {
+                        // Filter coefficients and calculate bias
+                        let bias: i32 = constraint.bias.0; // Using lower bound for bias
+                        let coefficients = &constraint.coefficients;
+
+                        // Check if all input variables are in results
+                        let all_inputs_available = coefficients
+                            .iter()
+                            .all(|(input_id, _)| results.contains_key(input_id));
+
+                        if !all_inputs_available {
+                            // Put the missing coefficients back to the queue
+                            for (input_id, _) in coefficients.iter() {
+                                if !results.contains_key(input_id) && !next_batch.contains(input_id)
+                                {
+                                    next_batch.push(input_id.clone());
+                                }
+                            }
+                            // Not all inputs are ready, push this node back to the queue
+                            next_batch.push(node_id.clone());
+                            continue;
+                        }
+
+                        // Get coefficient values from results
+                        let mut coef_vals = HashMap::new();
+                        for (input_id, _) in coefficients.iter() {
+                            if let Some(val) = results.get(input_id) {
+                                coef_vals.insert(input_id.clone(), val.clone());
+                            }
+                        }
+
+                        // Calculate result
+                        // Instead of allocating a Vec, accumulate directly.
+                        let summed = coefficients.iter().fold((0, 0), |acc, (input_id, coef)| {
+                            let bound = coef_vals.get(input_id).unwrap();
+                            let prod = bound_multiply(*coef, *bound);
+                            bound_add(acc, prod)
+                        });
+                        let biased = bound_add(summed, (bias, bias));
+
+                        results.insert(
+                            node_id.to_string(),
+                            ((biased.0 >= 0) as i32, (biased.1 >= 0) as i32),
+                        );
+                        visited.insert(node_id.clone());
+                        processed_this_batch.push(node_id.clone());
+                    }
+                }
+            }
+
+            // Add dependent nodes to next batch using our built parent_ids map
+            for node_id in processed_this_batch {
+                if let Some(parents) = parent_ids.get(&node_id) {
+                    for dependent in parents {
+                        if !visited.contains(dependent) && !next_batch.contains(dependent) {
+                            next_batch.push(dependent.clone());
+                        }
+                    }
+                }
+            }
+
+            if !next_batch.is_empty() {
+                queue = next_batch;
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Propagates bounds through the DAG bottom-up.
     ///
     /// Starting from the given variable assignments, this method computes bounds
@@ -790,10 +1001,11 @@ impl Pldag {
     ///
     /// # Arguments
     /// * `assignment` - Initial assignment of bounds to variables
+    /// * `to_root` - Optional root node to end propagation at
     ///
     /// # Returns
     /// Complete assignment including bounds for all reachable nodes
-    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>) -> Result<Assignment>
+    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>, to_root: Option<K>) -> Result<Assignment>
     where
         K: ToString,
     {
@@ -811,7 +1023,7 @@ impl Pldag {
 
         // Keep track of visited nodes to avoid reprocessing1
         let mut visited = HashSet::new();
-        while queue.len() > 0 {
+        while (queue.len() > 0) || (to_root.is_some() && !visited.contains(&to_root.as_ref().unwrap().to_string())) {
             let mut next_batch: Vec<String> = Vec::new();
             let mut processed_this_batch: Vec<String> = Vec::new();
             let batch_incoming = self.storage.get_nodes(&queue);
@@ -931,7 +1143,7 @@ impl Pldag {
     /// Complete assignments with bounds for all nodes
     pub fn propagate_default(&self) -> Result<Assignment> {
         let primitives = self.get_primitives(vec![]);
-        self.propagate(primitives)
+        self.propagate(primitives, None)
     }
 
     /// Computes ranks for all nodes in the DAG.
@@ -1921,7 +2133,7 @@ mod tests {
                 .collect::<IndexMap<&str, Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.propagate(interp).unwrap();
+            let prop = model.propagate(interp, Some(&root.clone())).unwrap();
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -1971,7 +2183,7 @@ mod tests {
         let mut assignments = IndexMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        let result = model.propagate(assignments).unwrap();
+        let result = model.propagate(assignments, None).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         let mut model = Pldag::new();
@@ -1989,22 +2201,40 @@ mod tests {
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments).unwrap();
+        let result = model.propagate(assignments, None).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments).unwrap();
+        let result = model.propagate(assignments, None).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 0));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (0, 0));
-        let result = model.propagate(assignments).unwrap();
+        let result = model.propagate(assignments, None).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
+
+        // Test propagation to specific root only and check that the others are not included in the result
+        let mut model = Pldag::new();
+        model.set_primitive("x", (0, 1));
+        model.set_primitive("y", (0, 1));
+        model.set_primitive("z", (0, 1));
+        let or_1 = model.set_or(vec!["x", "z"]).unwrap();
+        let or_2 = model.set_or(vec!["y", "z"]).unwrap();
+        let or_3 = model.set_or(vec!["x", "y"]).unwrap();
+        let root = model.set_and(vec![or_1.clone(), or_2.clone(), or_3.clone()]).unwrap();
+        let mut assignments = IndexMap::new();
+        assignments.insert("x", (1, 1));
+        let result = model.propagate(assignments, Some(&or_1)).unwrap();
+        assert_eq!(result.get("x").unwrap(), &(1, 1));
+        assert_eq!(result.get(&or_1).unwrap(), &(1, 1));
+        assert!(result.get(&or_2).is_none());
+        assert!(result.get(&or_3).is_none());
+        assert!(result.get(&root).is_none());
     }
 
     /// XOR already covered; test the OR gate
@@ -2024,20 +2254,20 @@ mod tests {
         // a=1 ⇒ output must be 1
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (1, 1));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, Some(&or_root.clone())).unwrap();
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (0, 0));
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, Some(&or_root.clone())).unwrap();
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, Some(&or_root.clone())).unwrap();
         assert_eq!(res[&or_root], (0, 1));
     }
 
@@ -2056,13 +2286,13 @@ mod tests {
         // p = 0 ⇒ root = 1
         let mut interp = IndexMap::<String, Bound>::new();
         interp.insert("p".into(), (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, Some(not_root.clone())).unwrap();
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (1, 1));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, Some(&not_root.clone())).unwrap();
         assert_eq!(res[&not_root], (0, 0));
     }
 
@@ -2148,7 +2378,7 @@ mod tests {
         interp.insert("x", (1, 1));
         interp.insert("y", (1, 1));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, None).unwrap();
         assert_eq!(res[&w], (1, 1));
         assert_eq!(res[&v], (1, 1));
 
@@ -2157,7 +2387,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (1, 1));
         interp.insert("z", (1, 1));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, None).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (1, 1));
 
@@ -2166,7 +2396,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (0, 0));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = model.propagate(interp, None).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (0, 0));
     }
@@ -2182,7 +2412,7 @@ mod tests {
         let mut interp = IndexMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u".into(), (5, 5));
-        let res = model.propagate(interp);
+        let res = model.propagate(interp, None);
 
         // Assert that we did get an error
         assert!(res.is_err());
@@ -2196,7 +2426,7 @@ mod tests {
                     .iter()
                     .map(|(k, &v)| (k.as_str(), (v, v)))
                     .collect::<IndexMap<&str, Bound>>();
-                let model_prop = model.propagate(assignments).unwrap();
+                let model_prop = model.propagate(assignments, None).unwrap();
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -2379,28 +2609,28 @@ mod tests {
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (2, 2)); // Out of bounds
-        let result = model.propagate(interp);
+        let result = model.propagate(interp, None);
         assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
         
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (-1, 2)); // Out of bounds
-        let result = model.propagate(interp);
+        let result = model.propagate(interp, None);
         assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
         
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (-1, -1)); // Out of bounds
-        let result = model.propagate(interp);
+        let result = model.propagate(interp, None);
         assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
         
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (1, 1)); // Not out of bounds
-        let result = model.propagate(interp);
+        let result = model.propagate(interp, None);
         assert!(matches!(result, Ok(_)));
     }
 
@@ -2740,5 +2970,54 @@ mod tests {
         assert_eq!(ranks.get("q"), Some(&0));
         assert_eq!(ranks.get(&equiv_node), Some(&2));
         assert_eq!(ranks.get(&imply_node), Some(&2));
+    }
+
+    #[test]
+    fn test_reduce() {
+        // A = B + C + D >= 3
+        // B = x + y >= 2
+        // C = y + z >= 2
+        // D = a >= 1
+
+        // and we give that a = 1, D = 1
+        // This should return a new DAG like:
+
+        // A = B + C >= 2
+        // B = x + y >= 2
+        // C = y + z >= 2
+        let mut model = Pldag::new();
+        model.set_primitive("a".into(), (0, 1));
+        model.set_primitive("x".into(), (0, 1));
+        model.set_primitive("y".into(), (0, 1));
+        model.set_primitive("z".into(), (0, 1));
+        let D = model.set_and(vec!["a"]).unwrap();
+        let C = model.set_and(vec!["y", "z"]).unwrap();
+        let B = model.set_and(vec!["x", "y"]).unwrap();
+        let A = model.set_and(vec![B.clone(), C.clone(), D.clone()]).unwrap();
+        let mut fixed = HashMap::new();
+        fixed.insert("a".into(), 1);
+        fixed.insert(D.clone(), 1);
+        let dag = model.sub_dag(vec![A.clone()]).unwrap();
+        let reduced_dag = Pldag::reduce(&dag, &fixed).unwrap();
+        // Check that D and a is not in reduced DAG
+        assert!(reduced_dag.get(&D).is_none());
+        assert!(reduced_dag.get(&"a".to_string()).is_none());
+        // Check that A, B, C, x, y, z are in reduced DAG
+        assert!(reduced_dag.get(&A).is_some());
+        assert!(reduced_dag.get(&B).is_some());
+        assert!(reduced_dag.get(&C).is_some());
+        assert!(reduced_dag.get(&"x".to_string()).is_some());
+        assert!(reduced_dag.get(&"y".to_string()).is_some());
+        assert!(reduced_dag.get(&"z".to_string()).is_some());
+
+        // Propagate the reduced DAG with x = 1, y = 1, z = 1, which should satisfy A = 1, B = 1, C = 1
+        let mut assignments = HashMap::new();
+        assignments.insert("x".to_string(), (1, 1));
+        assignments.insert("y".to_string(), (1, 1));
+        assignments.insert("z".to_string(), (1, 1));
+        let propagated = Pldag::propagate_dag(&reduced_dag, assignments).unwrap();
+        assert_eq!(propagated.get(&A).unwrap(), &(1, 1));
+        assert_eq!(propagated.get(&B).unwrap(), &(1, 1));
+        assert_eq!(propagated.get(&C).unwrap(), &(1, 1));
     }
 }
