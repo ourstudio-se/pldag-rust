@@ -1321,7 +1321,7 @@ mod glpk_tests {
         if let Some(assignments) = &solutions[0] {
             // Convert String keys to &str keys for propagate
             let str_assignments = assignments.iter().map(|(k, v)| (k.as_str(), *v));
-            let propagated = model.propagate(str_assignments, None).unwrap();
+            let propagated = model.propagate(str_assignments).unwrap();
 
             // Check that root is Some and is equal to 1
             assert!(

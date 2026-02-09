@@ -1,6 +1,6 @@
 [package]
 name        = "pldag"
-version     = "4.0.4"
+version     = "4.0.5"
 edition     = "2021"
 description = "A DAG-based combinatorial-model framework with optional GLPK solving back-end."
 license     = "MIT"

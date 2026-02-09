@@ -1005,7 +1005,7 @@ impl Pldag {
     ///
     /// # Returns
     /// Complete assignment including bounds for all reachable nodes
-    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>, to_root: Option<K>) -> Result<Assignment>
+    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>) -> Result<Assignment>
     where
         K: ToString,
     {
@@ -1023,7 +1023,7 @@ impl Pldag {
 
         // Keep track of visited nodes to avoid reprocessing1
         let mut visited = HashSet::new();
-        while (queue.len() > 0) || (to_root.is_some() && !visited.contains(&to_root.as_ref().unwrap().to_string())) {
+        while queue.len() > 0 {
             let mut next_batch: Vec<String> = Vec::new();
             let mut processed_this_batch: Vec<String> = Vec::new();
             let batch_incoming = self.storage.get_nodes(&queue);
@@ -1143,7 +1143,7 @@ impl Pldag {
     /// Complete assignments with bounds for all nodes
     pub fn propagate_default(&self) -> Result<Assignment> {
         let primitives = self.get_primitives(vec![]);
-        self.propagate(primitives, None)
+        self.propagate(primitives)
     }
 
     /// Computes ranks for all nodes in the DAG.
@@ -2133,7 +2133,7 @@ mod tests {
                 .collect::<IndexMap<&str, Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.propagate(interp, Some(&root.clone())).unwrap();
+            let prop = model.propagate(interp).unwrap();
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -2183,7 +2183,7 @@ mod tests {
         let mut assignments = IndexMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        let result = model.propagate(assignments, None).unwrap();
+        let result = model.propagate(assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         let mut model = Pldag::new();
@@ -2201,21 +2201,21 @@ mod tests {
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments, None).unwrap();
+        let result = model.propagate(assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments, None).unwrap();
+        let result = model.propagate(assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = IndexMap::new();
         assignments.insert("x", (0, 0));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (0, 0));
-        let result = model.propagate(assignments, None).unwrap();
+        let result = model.propagate(assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         // Test propagation to specific root only and check that the others are not included in the result
@@ -2229,7 +2229,8 @@ mod tests {
         let root = model.set_and(vec![or_1.clone(), or_2.clone(), or_3.clone()]).unwrap();
         let mut assignments = IndexMap::new();
         assignments.insert("x", (1, 1));
-        let result = model.propagate(assignments, Some(&or_1)).unwrap();
+        let sub_dag = model.sub_dag(vec![or_1.clone()]).unwrap();
+        let result = Pldag::propagate_dag(&sub_dag, assignments).unwrap();
         assert_eq!(result.get("x").unwrap(), &(1, 1));
         assert_eq!(result.get(&or_1).unwrap(), &(1, 1));
         assert!(result.get(&or_2).is_none());
@@ -2254,20 +2255,20 @@ mod tests {
         // a=1 ⇒ output must be 1
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (1, 1));
-        let res = model.propagate(interp, Some(&or_root.clone())).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("a".into(), (0, 0));
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp, Some(&or_root.clone())).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp, Some(&or_root.clone())).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&or_root], (0, 1));
     }
 
@@ -2286,13 +2287,13 @@ mod tests {
         // p = 0 ⇒ root = 1
         let mut interp = IndexMap::<String, Bound>::new();
         interp.insert("p".into(), (0, 0));
-        let res = model.propagate(interp, Some(not_root.clone())).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (1, 1));
-        let res = model.propagate(interp, Some(&not_root.clone())).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&not_root], (0, 0));
     }
 
@@ -2378,7 +2379,7 @@ mod tests {
         interp.insert("x", (1, 1));
         interp.insert("y", (1, 1));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp, None).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&w], (1, 1));
         assert_eq!(res[&v], (1, 1));
 
@@ -2387,7 +2388,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (1, 1));
         interp.insert("z", (1, 1));
-        let res = model.propagate(interp, None).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (1, 1));
 
@@ -2396,7 +2397,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (0, 0));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp, None).unwrap();
+        let res = model.propagate(interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (0, 0));
     }
@@ -2412,7 +2413,7 @@ mod tests {
         let mut interp = IndexMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u".into(), (5, 5));
-        let res = model.propagate(interp, None);
+        let res = model.propagate(interp);
 
         // Assert that we did get an error
         assert!(res.is_err());
@@ -2426,7 +2427,7 @@ mod tests {
                     .iter()
                     .map(|(k, &v)| (k.as_str(), (v, v)))
                     .collect::<IndexMap<&str, Bound>>();
-                let model_prop = model.propagate(assignments, None).unwrap();
+                let model_prop = model.propagate(assignments).unwrap();
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -2609,28 +2610,28 @@ mod tests {
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (2, 2)); // Out of bounds
-        let result = model.propagate(interp, None);
+        let result = model.propagate(interp);
         assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
         
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (-1, 2)); // Out of bounds
-        let result = model.propagate(interp, None);
+        let result = model.propagate(interp);
         assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
         
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (-1, -1)); // Out of bounds
-        let result = model.propagate(interp, None);
+        let result = model.propagate(interp);
         assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
         
         let mut model = Pldag::new();
         model.set_primitive("p", (0, 1));
         let mut interp = IndexMap::<&str, Bound>::new();
         interp.insert("p".into(), (1, 1)); // Not out of bounds
-        let result = model.propagate(interp, None);
+        let result = model.propagate(interp);
         assert!(matches!(result, Ok(_)));
     }
 
