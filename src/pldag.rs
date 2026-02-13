@@ -897,9 +897,8 @@ impl Pldag {
                 let node = match dag.get(&node_id) {
                     Some(n) => n,
                     None => {
-                        return Err(PldagError::NodeNotFound {
-                            node_id: node_id.clone(),
-                        })
+                        // We just don't care if user applied a node that's not in the dag
+                        continue
                     }
                 };
 
@@ -1037,9 +1036,8 @@ impl Pldag {
                 let node = match batch_incoming.get(&node_id) {
                     Some(n) => n,
                     None => {
-                        return Err(PldagError::NodeNotFound {
-                            node_id: node_id.clone(),
-                        })
+                        // We just don't care if user applied a node that's not in the dag
+                        continue
                     }
                 };
 
@@ -3020,5 +3018,24 @@ mod tests {
         assert_eq!(propagated.get(&A).unwrap(), &(1, 1));
         assert_eq!(propagated.get(&B).unwrap(), &(1, 1));
         assert_eq!(propagated.get(&C).unwrap(), &(1, 1));
+    }
+
+    #[test]
+    fn test_propagte_with_id_not_in_dag_shoul_pass() {
+        let mut model = Pldag::new();
+        model.set_primitive("x".into(), (0, 1));
+        model.set_primitive("y".into(), (0, 1));
+        model.set_primitive("z".into(), (0, 1));
+        let root = model.set_and(vec!["x", "y", "z"]).unwrap();
+        let mut assignments = HashMap::new();
+        assignments.insert("x".to_string(), (1, 1));
+        assignments.insert("y".to_string(), (1, 1));
+        assignments.insert("z".to_string(), (1, 1));
+        let dag = model.sub_dag(vec![root.clone()]).unwrap();
+        let propagated = Pldag::propagate_dag(&dag, assignments.clone()).unwrap();
+        assert_eq!(propagated.get(&root).unwrap(), &(1, 1));
+
+        let propagated = model.propagate(assignments).unwrap();
+        assert_eq!(propagated.get(&root).unwrap(), &(1, 1));
     }
 }
