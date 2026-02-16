@@ -1,4 +1,4 @@
-use indexmap::IndexMap;
+use std::collections::HashMap;
 use pldag::{Bound, Pldag};
 
 fn main() {
@@ -15,9 +15,12 @@ fn main() {
     // A reference ID is returned
     let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
 
+    // Export a sub dag
+    let mut dag = pldag.sub_dag(vec![root.clone()]).unwrap();
+
     // 1. Validate a combination:
-    let mut inputs: IndexMap<&str, Bound> = IndexMap::new();
-    let validated = pldag.propagate_default().unwrap();
+    let mut inputs: HashMap<&str, Bound> = HashMap::new();
+    let validated = Pldag::propagate_dag(&mut dag, inputs.clone()).unwrap();
     // Since nothing is given, and all other variables implicitly have bounds (0, 1) from the pldag model,
     // the root will be (0,1) since there's not enough information to evaluate the root `or` node.
     println!("Root valid? {}", *validated.get(&root).unwrap() == (1, 1)); // This will be false
@@ -39,8 +42,9 @@ fn main() {
     pldag.set_primitive("y", (0, 1));
     pldag.set_primitive("z", (0, 1));
     let root = pldag.set_or(vec!["x", "y", "z"]).unwrap();
+    let mut dag = pldag.sub_dag(vec![root.clone()]).unwrap();
 
     // 1. Validate a combination
-    let validated = pldag.propagate_default().unwrap();
+    let validated = dag.propagate(inputs).unwrap();
     println!("root bound = {:?}", validated[&root]);
 }

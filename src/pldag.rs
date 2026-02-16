@@ -698,18 +698,19 @@ pub enum Node {
     Primitive(Bound),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum Kind {
     Primitive { inherent: Bound },
     Composite { bias_lo: i32, coef_range: (usize, usize) }, // range into flat coef vec
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub struct Coef {
     pub input: u32,
     pub coef: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CompiledDag {
     // Map external string id -> dense int id
     pub id_to_ix: HashMap<String, u32>,
