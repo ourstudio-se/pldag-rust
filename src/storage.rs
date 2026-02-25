@@ -1,3 +1,4 @@
+use crate::Bound;
 use crate::pldag::Node;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -13,6 +14,9 @@ pub trait KeyValueStore: Send + Sync {
 
     /// Set value for key
     fn set(&self, key: &str, value: Value);
+
+    // Set multiple key-value pairs
+    fn mset(&self, kv_pairs: &[(String, Value)]);
 
     /// Check if key exists
     fn exists(&self, key: &str) -> bool;
@@ -40,6 +44,8 @@ pub trait NodeStoreTrait: Send + Sync {
 
     /// Set node for id
     fn set_node(&self, id: &str, node: Node);
+
+    fn set_primitives(&self, primitives: &[(&str, &Bound)]);
 
     /// Check if node exists
     fn node_exists(&self, id: &str) -> bool;
@@ -105,8 +111,8 @@ impl NodeStoreTrait for NodeStore {
         match node {
             Node::Primitive(p) => {
                 // Insert the primitive variable as a node
-                self.data
-                    .set(id, serde_json::to_value(Node::Primitive(p)).unwrap());
+                let value = serde_json::to_value(Node::Primitive(p)).unwrap();
+                self.data.set(id, value);
             }
             Node::Composite(c) => {
                 let value = serde_json::to_value(&Node::Composite(c.clone())).unwrap();
@@ -133,6 +139,20 @@ impl NodeStoreTrait for NodeStore {
                 }
             }
         }
+    }
+
+    fn set_primitives(&self, primitives: &[(&str, &Bound)]) {
+        let kv_pairs = primitives
+            .into_iter()
+            .map(|(id, &bound)| {
+                (
+                    id.to_string(),
+                    serde_json::to_value(Node::Primitive(bound.clone())).unwrap(),
+                )
+            })
+            .collect::<Vec<(String, serde_json::Value)>>();
+
+        self.data.mset(&kv_pairs);
     }
 
     fn node_exists(&self, id: &str) -> bool {
@@ -255,6 +275,13 @@ impl KeyValueStore for InMemoryStore {
         data.insert(key.to_string(), value);
     }
 
+    fn mset(&self, kv_pairs: &[(String, Value)]) {
+        let mut data = self.data.write().unwrap();
+        for (key, value) in kv_pairs {
+            data.insert(key.to_string(), value.clone());
+        }
+    }
+
     fn exists(&self, key: &str) -> bool {
         let data = self.data.read().unwrap();
         data.contains_key(key)
@@ -309,18 +336,21 @@ mod tests {
 
         // Create a composite node that references child1 and child2
         let parent = Node::Composite(Constraint {
-            coefficients: vec![
-                ("child1".to_string(), 2),
-                ("child2".to_string(), 3),
-            ],
+            coefficients: vec![("child1".to_string(), 2), ("child2".to_string(), 3)],
             bias: (0, 0),
         });
         node_store.set_node("parent", parent);
 
         // Verify that backward references were created
         let parent_ids = node_store.get_parent_ids(&["child1".to_string(), "child2".to_string()]);
-        assert_eq!(parent_ids.get("child1").unwrap(), &vec!["parent".to_string()]);
-        assert_eq!(parent_ids.get("child2").unwrap(), &vec!["parent".to_string()]);
+        assert_eq!(
+            parent_ids.get("child1").unwrap(),
+            &vec!["parent".to_string()]
+        );
+        assert_eq!(
+            parent_ids.get("child2").unwrap(),
+            &vec!["parent".to_string()]
+        );
 
         // Delete the parent node
         node_store.delete("parent");
@@ -329,9 +359,16 @@ mod tests {
         assert!(!node_store.node_exists("parent"));
 
         // Verify that backward references are cleaned up
-        let parent_ids_after = node_store.get_parent_ids(&["child1".to_string(), "child2".to_string()]);
-        assert_eq!(parent_ids_after.get("child1").unwrap(), &Vec::<String>::new());
-        assert_eq!(parent_ids_after.get("child2").unwrap(), &Vec::<String>::new());
+        let parent_ids_after =
+            node_store.get_parent_ids(&["child1".to_string(), "child2".to_string()]);
+        assert_eq!(
+            parent_ids_after.get("child1").unwrap(),
+            &Vec::<String>::new()
+        );
+        assert_eq!(
+            parent_ids_after.get("child2").unwrap(),
+            &Vec::<String>::new()
+        );
 
         // Verify that child nodes still exist
         assert!(node_store.node_exists("child1"));
@@ -370,7 +407,10 @@ mod tests {
 
         // Verify only parent2 remains in backward references
         let parent_ids_after = node_store.get_parent_ids(&["child".to_string()]);
-        assert_eq!(parent_ids_after.get("child").unwrap(), &vec!["parent2".to_string()]);
+        assert_eq!(
+            parent_ids_after.get("child").unwrap(),
+            &vec!["parent2".to_string()]
+        );
 
         // Verify parent1 is gone but parent2 still exists
         assert!(!node_store.node_exists("parent1"));
@@ -417,7 +457,11 @@ mod tests {
         node_store.set_node("comp1", composite.clone());
 
         // Test get_nodes
-        let nodes = node_store.get_nodes(&["prim1".to_string(), "prim2".to_string(), "comp1".to_string()]);
+        let nodes = node_store.get_nodes(&[
+            "prim1".to_string(),
+            "prim2".to_string(),
+            "comp1".to_string(),
+        ]);
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes.get("prim1").unwrap(), &Node::Primitive((0, 5)));
         assert_eq!(nodes.get("prim2").unwrap(), &Node::Primitive((-10, 10)));
@@ -442,10 +486,13 @@ mod tests {
         // Add some nodes
         node_store.set_node("a", Node::Primitive((0, 1)));
         node_store.set_node("b", Node::Primitive((0, 2)));
-        node_store.set_node("c", Node::Composite(Constraint {
-            coefficients: vec![("a".to_string(), 1)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "c",
+            Node::Composite(Constraint {
+                coefficients: vec![("a".to_string(), 1)],
+                bias: (0, 0),
+            }),
+        );
 
         let all_nodes = node_store.get_all_nodes();
         assert_eq!(all_nodes.len(), 3);
@@ -483,10 +530,13 @@ mod tests {
         // Add nodes
         node_store.set_node("node1", Node::Primitive((0, 1)));
         node_store.set_node("node2", Node::Primitive((0, 2)));
-        node_store.set_node("parent", Node::Composite(Constraint {
-            coefficients: vec![("node1".to_string(), 1), ("node2".to_string(), 2)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent",
+            Node::Composite(Constraint {
+                coefficients: vec![("node1".to_string(), 1), ("node2".to_string(), 2)],
+                bias: (0, 0),
+            }),
+        );
 
         let mut ids = node_store.node_ids();
         ids.sort();
@@ -511,19 +561,29 @@ mod tests {
         assert_eq!(parent_ids.get("child1").unwrap(), &Vec::<String>::new());
 
         // Create parent that references child1 and child2
-        node_store.set_node("parent1", Node::Composite(Constraint {
-            coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent1",
+            Node::Composite(Constraint {
+                coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
+                bias: (0, 0),
+            }),
+        );
 
         // Create another parent that references child1 and child3
-        node_store.set_node("parent2", Node::Composite(Constraint {
-            coefficients: vec![("child1".to_string(), 3), ("child3".to_string(), 4)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent2",
+            Node::Composite(Constraint {
+                coefficients: vec![("child1".to_string(), 3), ("child3".to_string(), 4)],
+                bias: (0, 0),
+            }),
+        );
 
         // Test get_parent_ids
-        let parent_ids = node_store.get_parent_ids(&["child1".to_string(), "child2".to_string(), "child3".to_string()]);
+        let parent_ids = node_store.get_parent_ids(&[
+            "child1".to_string(),
+            "child2".to_string(),
+            "child3".to_string(),
+        ]);
 
         let mut child1_parents = parent_ids.get("child1").unwrap().clone();
         child1_parents.sort();
@@ -534,7 +594,10 @@ mod tests {
 
         // Test with non-existent child
         let parent_ids = node_store.get_parent_ids(&["nonexistent".to_string()]);
-        assert_eq!(parent_ids.get("nonexistent").unwrap(), &Vec::<String>::new());
+        assert_eq!(
+            parent_ids.get("nonexistent").unwrap(),
+            &Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -551,21 +614,34 @@ mod tests {
         node_store.set_node("child3", Node::Primitive((0, 1)));
 
         // Create composite nodes with children
-        node_store.set_node("parent1", Node::Composite(Constraint {
-            coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent1",
+            Node::Composite(Constraint {
+                coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
+                bias: (0, 0),
+            }),
+        );
 
-        node_store.set_node("parent2", Node::Composite(Constraint {
-            coefficients: vec![("child3".to_string(), 1)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent2",
+            Node::Composite(Constraint {
+                coefficients: vec![("child3".to_string(), 1)],
+                bias: (0, 0),
+            }),
+        );
 
         // Test get_children_ids
-        let children_map = node_store.get_children_ids(&["prim".to_string(), "parent1".to_string(), "parent2".to_string()]);
+        let children_map = node_store.get_children_ids(&[
+            "prim".to_string(),
+            "parent1".to_string(),
+            "parent2".to_string(),
+        ]);
 
         assert_eq!(children_map.get("prim").unwrap(), &Vec::<String>::new());
-        assert_eq!(children_map.get("parent1").unwrap(), &vec!["child1", "child2"]);
+        assert_eq!(
+            children_map.get("parent1").unwrap(),
+            &vec!["child1", "child2"]
+        );
         assert_eq!(children_map.get("parent2").unwrap(), &vec!["child3"]);
 
         // Test with non-existent node
@@ -582,20 +658,26 @@ mod tests {
         node_store.set_node("child", Node::Primitive((0, 1)));
 
         // Create parent with one reference to child
-        node_store.set_node("parent", Node::Composite(Constraint {
-            coefficients: vec![("child".to_string(), 1)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent",
+            Node::Composite(Constraint {
+                coefficients: vec![("child".to_string(), 1)],
+                bias: (0, 0),
+            }),
+        );
 
         let parent_ids = node_store.get_parent_ids(&["child".to_string()]);
         assert_eq!(parent_ids.get("child").unwrap(), &vec!["parent"]);
 
         // Update parent to add another child
         node_store.set_node("child2", Node::Primitive((0, 1)));
-        node_store.set_node("parent", Node::Composite(Constraint {
-            coefficients: vec![("child".to_string(), 1), ("child2".to_string(), 2)],
-            bias: (0, 0),
-        }));
+        node_store.set_node(
+            "parent",
+            Node::Composite(Constraint {
+                coefficients: vec![("child".to_string(), 1), ("child2".to_string(), 2)],
+                bias: (0, 0),
+            }),
+        );
 
         // Verify both children have parent in their references
         let parent_ids = node_store.get_parent_ids(&["child".to_string(), "child2".to_string()]);
@@ -651,5 +733,32 @@ mod tests {
 
         kv_store.set("key", serde_json::json!(42));
         assert_eq!(kv_store.get("key"), Some(serde_json::json!(42)));
+    }
+
+    #[test]
+    fn test_set_primitives() {
+        let store = Arc::new(InMemoryStore::new());
+        let node_store = NodeStore::new(store);
+
+        let primitives: Vec<(&str, Bound)> = vec![
+            ("prim1", (0, 1)),
+            ("prim2", (-5, 5)),
+            ("prim3", (10, 20)),
+        ];
+
+        let primitives_ref: Vec<(&str, &Bound)> = primitives.iter().map(|(s, b)| (*s, b)).collect();
+        node_store.set_primitives(&primitives_ref);
+
+        // Verify that all primitives were set correctly
+        let nodes = node_store.get_nodes(&["prim1".to_string(), "prim2".to_string(), "prim3".to_string()]);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.get("prim1").unwrap(), &Node::Primitive((0, 1)));
+        assert_eq!(nodes.get("prim2").unwrap(), &Node::Primitive((-5, 5)));
+        assert_eq!(nodes.get("prim3").unwrap(), &Node::Primitive((10, 20)));
+
+        // Verify using get_all_nodes as well
+        let all_nodes = node_store.get_all_nodes();
+        assert_eq!(all_nodes.len(), 3);
+        assert_eq!(all_nodes.get("prim1").unwrap(), &Node::Primitive((0, 1)));
     }
 }

@@ -1986,16 +1986,19 @@ impl Pldag {
     /// # Arguments
     /// * `ids` - Iterator of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
-    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Vec<Result<ID>>
+    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
     where
         K: ToString,
     {
         let unique_ids: IndexSet<String> = ids.into_iter().map(|k| k.to_string()).collect();
-        let results: Vec<Result<ID>> = unique_ids
+        let primitives: Vec<(&str, &Bound)> = unique_ids
             .iter()
-            .map(|id| self.set_primitive(id, bound))
+            .map(|id| (id.as_str(), &bound))
             .collect();
-        results
+
+        self.storage.set_primitives(&primitives);
+
+        Ok(unique_ids.into_iter().collect())
     }
 
     /// Creates a general linear inequality constraint.
