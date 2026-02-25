@@ -734,4 +734,31 @@ mod tests {
         kv_store.set("key", serde_json::json!(42));
         assert_eq!(kv_store.get("key"), Some(serde_json::json!(42)));
     }
+
+    #[test]
+    fn test_set_primitives() {
+        let store = Arc::new(InMemoryStore::new());
+        let node_store = NodeStore::new(store);
+
+        let primitives: Vec<(&str, Bound)> = vec![
+            ("prim1", (0, 1)),
+            ("prim2", (-5, 5)),
+            ("prim3", (10, 20)),
+        ];
+
+        let primitives_ref: Vec<(&str, &Bound)> = primitives.iter().map(|(s, b)| (*s, b)).collect();
+        node_store.set_primitives(&primitives_ref);
+
+        // Verify that all primitives were set correctly
+        let nodes = node_store.get_nodes(&["prim1".to_string(), "prim2".to_string(), "prim3".to_string()]);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.get("prim1").unwrap(), &Node::Primitive((0, 1)));
+        assert_eq!(nodes.get("prim2").unwrap(), &Node::Primitive((-5, 5)));
+        assert_eq!(nodes.get("prim3").unwrap(), &Node::Primitive((10, 20)));
+
+        // Verify using get_all_nodes as well
+        let all_nodes = node_store.get_all_nodes();
+        assert_eq!(all_nodes.len(), 3);
+        assert_eq!(all_nodes.get("prim1").unwrap(), &Node::Primitive((0, 1)));
+    }
 }
