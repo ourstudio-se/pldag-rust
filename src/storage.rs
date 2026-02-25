@@ -1,3 +1,4 @@
+use crate::Bound;
 use crate::pldag::Node;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -13,6 +14,9 @@ pub trait KeyValueStore: Send + Sync {
 
     /// Set value for key
     fn set(&self, key: &str, value: Value);
+
+    // Set multiple key-value pairs
+    fn mset(&self, kv_pairs: &[(String, Value)]);
 
     /// Check if key exists
     fn exists(&self, key: &str) -> bool;
@@ -40,6 +44,8 @@ pub trait NodeStoreTrait: Send + Sync {
 
     /// Set node for id
     fn set_node(&self, id: &str, node: Node);
+
+    fn set_primitives(&self, primitives: &[(&str, &Bound)]);
 
     /// Check if node exists
     fn node_exists(&self, id: &str) -> bool;
@@ -105,8 +111,8 @@ impl NodeStoreTrait for NodeStore {
         match node {
             Node::Primitive(p) => {
                 // Insert the primitive variable as a node
-                self.data
-                    .set(id, serde_json::to_value(Node::Primitive(p)).unwrap());
+                let value = serde_json::to_value(Node::Primitive(p)).unwrap();
+                self.data.set(id, value);
             }
             Node::Composite(c) => {
                 let value = serde_json::to_value(&Node::Composite(c.clone())).unwrap();
@@ -133,6 +139,20 @@ impl NodeStoreTrait for NodeStore {
                 }
             }
         }
+    }
+
+    fn set_primitives(&self, primitives: &[(&str, &Bound)]) {
+        let kv_pairs = primitives
+            .into_iter()
+            .map(|(id, &bound)| {
+                (
+                    id.to_string(),
+                    serde_json::to_value(Node::Primitive(bound.clone())).unwrap(),
+                )
+            })
+            .collect::<Vec<(String, serde_json::Value)>>();
+
+            self.data.mset(&kv_pairs);
     }
 
     fn node_exists(&self, id: &str) -> bool {
@@ -253,6 +273,13 @@ impl KeyValueStore for InMemoryStore {
     fn set(&self, key: &str, value: Value) {
         let mut data = self.data.write().unwrap();
         data.insert(key.to_string(), value);
+    }
+
+    fn mset(&self, kv_pairs: &[(String, Value)]) {
+        let mut data = self.data.write().unwrap();
+        for (key, value) in kv_pairs {
+            data.insert(key.to_string(), value.clone());
+        }
     }
 
     fn exists(&self, key: &str) -> bool {
