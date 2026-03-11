@@ -1093,7 +1093,8 @@ impl CompiledDag {
 /// The DAG structure ensures no cycles and enables efficient bottom-up propagation.
 pub struct Pldag {
     /// Store for mapping node IDs to their corresponding nodes, supporting multiple access patterns
-    pub storage: Box<dyn NodeStoreTrait>,
+    pub storage: Arc<dyn NodeStoreTrait>,
+    validate_coeffs: bool,
 }
 
 impl Pldag {
@@ -1103,12 +1104,21 @@ impl Pldag {
     /// A new `Pldag` instance with no nodes
     pub fn new() -> Pldag {
         Pldag {
-            storage: Box::new(NodeStore::new(Arc::new(InMemoryStore::new()))),
+            storage: Arc::new(NodeStore::new(Arc::new(InMemoryStore::new()))),
+            validate_coeffs: true,
         }
     }
 
-    pub fn new_custom(storage: Box<dyn NodeStoreTrait>) -> Pldag {
-        Pldag { storage }
+    pub fn new_custom(storage: Arc<dyn NodeStoreTrait>) -> Pldag {
+        Pldag { storage, validate_coeffs: true }
+    }
+
+    /// Sets whether to validate that coefficients exists on insertion, guaranteeing a valid DAG, at the
+    /// cost of extra lookups on insertion.
+    /// Default value is true.
+    pub fn set_validate_coeffs(mut self, validate_coeffs: bool) -> Self {
+        self.validate_coeffs = validate_coeffs;
+        self
     }
 
     /// Full tightening over the DAG given initial assumptions.
@@ -1679,7 +1689,7 @@ impl Pldag {
         let mut queue: Vec<String> = roots;
 
         // Use a HashSet for visited tracking (faster than HashMap::contains_key)
-        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut visited: HashSet<String> = HashSet::new();
 
         // Accumulate nodes in order of discovery - this preserves some locality
         let mut nodes: Vec<(String, Node)> = Vec::new();
@@ -1943,6 +1953,17 @@ impl Pldag {
         self.storage.get_nodes(&[id.to_string()]).get(id).cloned()
     }
 
+    /// Retrieves multiple nodes by their IDs.
+    /// If a requested ID does not exist, it will simply be omitted from the result.
+    ///
+    /// # Arguments
+    /// * `ids` - A slice of unique identifiers for the nodes to retrieve
+    /// # Returns
+    /// A `HashMap<String, Node>` mapping each requested ID to its corresponding Node.
+    pub fn get_nodes(&self, ids: &[String]) -> HashMap<String, Node> {
+        self.storage.get_nodes(ids)
+    }
+
     /// Deletes a node from the PL-DAG by its ID.
     ///
     /// # Arguments
@@ -2027,11 +2048,13 @@ impl Pldag {
         }
 
         // Check that all coefficient IDs exist in storage
-        for coef_id in unique_coefficients.keys() {
-            if !self.storage.node_exists(coef_id) {
-                return Err(PldagError::NodeNotFound {
-                    node_id: coef_id.clone(),
-                });
+        if self.validate_coeffs {
+            for coef_id in unique_coefficients.keys() {
+                if !self.storage.node_exists(coef_id) {
+                    return Err(PldagError::NodeNotFound {
+                        node_id: coef_id.clone(),
+                    });
+                }
             }
         }
 
