@@ -125,8 +125,7 @@ impl NodeStoreTrait for NodeStore {
                     .iter()
                     .map(|(coef_id, _)| coef_id.to_string())
                     .collect();
-                let mut coefficient_current_references: HashMap<String, Vec<String>> =
-                    self.get_parent_ids(&coef_ids);
+                let mut coefficient_current_references  = self.get_parent_ids(&coef_ids);
 
                 for (coef_id, current_references) in coefficient_current_references.iter_mut() {
                     if !current_references.contains(&id.to_string()) {
