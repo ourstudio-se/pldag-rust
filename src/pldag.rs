@@ -698,13 +698,13 @@ pub enum Node {
     Primitive(Bound),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub enum Kind {
     Primitive { inherent: Bound },
     Composite { bias_lo: i32, coef_range: (usize, usize) }, // range into flat coef vec
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub struct Coef {
     pub input: u32,
     pub coef: i32,
@@ -807,13 +807,10 @@ impl CompiledDag {
         self.missing.push(0);
     }
 
-    pub fn compile(dag: &HashMap<String, Node>) -> Self {
-        Self::compile_optimized(dag.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-    }
-
     /// Optimized compilation from a Vec of (String, Node) pairs.
     /// This avoids redundant HashMap lookups and enables single-pass optimization.
-    pub fn compile_optimized(nodes: Vec<(String, Node)>) -> Self {
+    pub fn compile(mut nodes: Vec<(String, Node)>) -> Self {
+        nodes.sort_by(|(a, _), (b, _)| a.cmp(b));
         let n = nodes.len();
 
         // Pre-allocate all structures with exact capacity
@@ -1276,7 +1273,7 @@ impl Pldag {
             }
         }
 
-        Ok(CompiledDag::compile_optimized(nodes))
+        Ok(CompiledDag::compile(nodes))
     }
 
     /// Static propagation function that works on any DAG without requiring storage.
@@ -1729,14 +1726,12 @@ impl Pldag {
         }
 
         // Use optimized compilation directly from the ordered node list
-        Ok(CompiledDag::compile_optimized(nodes))
+        Ok(CompiledDag::compile(nodes))
     }
 
     pub fn dag(&self) -> CompiledDag {
-        let all_nodes = self.storage.get_all_nodes();
-        CompiledDag::compile_optimized(
-            all_nodes.into_iter().collect()
-        )
+        let all_nodes = self.storage.get_all_nodes().into_iter().collect::<Vec<_>>();
+        CompiledDag::compile(all_nodes)
     }
 
     /// Converts the PL-DAG to a sparse polyhedron for ILP solving.
@@ -2474,6 +2469,26 @@ mod tests {
             coefficients,
             bias: (bias, bias),
         })
+    }
+
+    #[test]
+    fn test_compiled_dag_sorts(){
+        let mut model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1));
+        let _ = model.set_primitive("y", (0, 1));
+        let _ = model.set_primitive("z", (0, 1));
+        let id = model.set_and(vec!["x", "y", "z"]).unwrap();
+
+        let ids: Vec<_> = ["x", "y", "z", &id].iter().map(|s| s.to_string()).collect();
+        let nodes_first: Vec<_> = model.get_nodes(&ids).into_iter().map(|(id, node)| (id, node)).collect();
+        let nodes_second = vec![nodes_first[1].clone(), nodes_first[0].clone(), nodes_first[3].clone(), nodes_first[2].clone()]; // shuffle the order
+
+        let dag_first = CompiledDag::compile(nodes_first);
+        let dag_second = CompiledDag::compile(nodes_second);
+        
+        assert_eq!(dag_first.kind, dag_second.kind, "Compiled DAGs kind list differ");
+        assert_eq!(dag_first.ix_to_id, dag_second.ix_to_id, "Compiled DAGs ix_to_id list differ");
+        assert_eq!(dag_first.coefs, dag_second.coefs, "Compiled DAGs coefficients differ");
     }
 
     #[test]
