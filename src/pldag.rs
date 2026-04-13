@@ -698,13 +698,13 @@ pub enum Node {
     Primitive(Bound),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub enum Kind {
     Primitive { inherent: Bound },
     Composite { bias_lo: i32, coef_range: (usize, usize) }, // range into flat coef vec
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub struct Coef {
     pub input: u32,
     pub coef: i32,
@@ -2469,6 +2469,26 @@ mod tests {
             coefficients,
             bias: (bias, bias),
         })
+    }
+
+    #[test]
+    fn test_compiled_dag_sorts(){
+        let mut model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1));
+        let _ = model.set_primitive("y", (0, 1));
+        let _ = model.set_primitive("z", (0, 1));
+        let id = model.set_and(vec!["x", "y", "z"]).unwrap();
+
+        let ids: Vec<_> = ["x", "y", "z", &id].iter().map(|s| s.to_string()).collect();
+        let nodes_first: Vec<_> = model.get_nodes(&ids).into_iter().map(|(id, node)| (id, node)).collect();
+        let nodes_second = vec![nodes_first[1].clone(), nodes_first[0].clone(), nodes_first[3].clone(), nodes_first[2].clone()]; // shuffle the order
+
+        let dag_first = CompiledDag::compile(nodes_first);
+        let dag_second = CompiledDag::compile(nodes_second);
+        
+        assert_eq!(dag_first.kind, dag_second.kind, "Compiled DAGs kind list differ");
+        assert_eq!(dag_first.ix_to_id, dag_second.ix_to_id, "Compiled DAGs ix_to_id list differ");
+        assert_eq!(dag_first.coefs, dag_second.coefs, "Compiled DAGs coefficients differ");
     }
 
     #[test]
