@@ -807,13 +807,10 @@ impl CompiledDag {
         self.missing.push(0);
     }
 
-    pub fn compile(dag: &HashMap<String, Node>) -> Self {
-        Self::compile_optimized(dag.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-    }
-
     /// Optimized compilation from a Vec of (String, Node) pairs.
     /// This avoids redundant HashMap lookups and enables single-pass optimization.
-    pub fn compile_optimized(nodes: Vec<(String, Node)>) -> Self {
+    pub fn compile(mut nodes: Vec<(String, Node)>) -> Self {
+        nodes.sort_by(|(a, _), (b, _)| a.cmp(b));
         let n = nodes.len();
 
         // Pre-allocate all structures with exact capacity
@@ -1276,7 +1273,7 @@ impl Pldag {
             }
         }
 
-        Ok(CompiledDag::compile_optimized(nodes))
+        Ok(CompiledDag::compile(nodes))
     }
 
     /// Static propagation function that works on any DAG without requiring storage.
@@ -1729,14 +1726,12 @@ impl Pldag {
         }
 
         // Use optimized compilation directly from the ordered node list
-        Ok(CompiledDag::compile_optimized(nodes))
+        Ok(CompiledDag::compile(nodes))
     }
 
     pub fn dag(&self) -> CompiledDag {
-        let all_nodes = self.storage.get_all_nodes();
-        CompiledDag::compile_optimized(
-            all_nodes.into_iter().collect()
-        )
+        let all_nodes = self.storage.get_all_nodes().into_iter().collect::<Vec<_>>();
+        CompiledDag::compile(all_nodes)
     }
 
     /// Converts the PL-DAG to a sparse polyhedron for ILP solving.
