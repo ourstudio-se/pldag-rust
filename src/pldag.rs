@@ -1967,7 +1967,7 @@ impl Pldag {
     /// Note: 
     ///
     /// Returns nothing.
-    pub fn delete_node(&mut self, id: &str) -> Result<()> {
+    pub fn delete_node(&self, id: &str) -> Result<()> {
         let parents = self.storage.get_parent_ids(&[id.to_string()]);
         if let Some(parents) = parents.get(id) {
             if !parents.is_empty() {
@@ -1989,7 +1989,7 @@ impl Pldag {
     /// # Arguments
     /// * `id` - Unique identifier for the variable
     /// * `bound` - The allowed range (min, max) for this variable
-    pub fn set_primitive(&mut self, id: &str, bound: Bound) -> Result<ID> {
+    pub fn set_primitive(&self, id: &str, bound: Bound) -> Result<ID> {
         self.storage.set_node(id, Node::Primitive(bound));
         Ok(id.to_string())
     }
@@ -2002,7 +2002,7 @@ impl Pldag {
     /// # Arguments
     /// * `ids` - Iterator of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
-    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
+    pub fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
     where
         K: ToString,
     {
@@ -2029,7 +2029,7 @@ impl Pldag {
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any coefficient ID doesn't exist
     pub fn set_gelineq<K>(
-        &mut self,
+        &self,
         coefficient_variables: impl IntoIterator<Item = (K, i32)>,
         bias: i32,
     ) -> Result<ID>
@@ -2083,7 +2083,7 @@ impl Pldag {
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
     pub fn set_atleast<K>(
-        &mut self,
+        &self,
         references: impl IntoIterator<Item = K>,
         value: i32,
     ) -> Result<ID>
@@ -2094,7 +2094,7 @@ impl Pldag {
     }
 
     pub fn set_atleast_ref<K, V>(
-        &mut self,
+        &self,
         references: impl IntoIterator<Item = K>,
         value: V,
     ) -> Result<ID>
@@ -2120,7 +2120,7 @@ impl Pldag {
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
     pub fn set_atmost<K>(
-        &mut self,
+        &self,
         references: impl IntoIterator<Item = K>,
         value: i32,
     ) -> Result<ID>
@@ -2131,7 +2131,7 @@ impl Pldag {
     }
 
     pub fn set_atmost_ref<K, V>(
-        &mut self,
+        &self,
         references: impl IntoIterator<Item = K>,
         value: V,
     ) -> Result<ID>
@@ -2159,7 +2159,7 @@ impl Pldag {
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
     pub fn set_equal<K, I>(
-        &mut self,
+        &self,
         references: I,
         value: i32,
     ) -> Result<ID>
@@ -2173,7 +2173,7 @@ impl Pldag {
     }
 
     pub fn set_equal_ref<K, V, I>(
-        &mut self,
+        &self,
         references: I,
         value: V,
     ) -> Result<ID>
@@ -2197,7 +2197,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2217,7 +2217,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2236,7 +2236,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_optional<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_optional<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2255,7 +2255,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2278,7 +2278,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2297,7 +2297,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2316,7 +2316,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2337,7 +2337,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
     where
         K: ToString,
     {
@@ -2359,7 +2359,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> Result<ID>
+    pub fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> Result<ID>
     where
         C: ToString,
         Q: ToString,
@@ -2379,7 +2379,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> Result<ID>
+    pub fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> Result<ID>
     where
         L: ToString,
         R: ToString,
