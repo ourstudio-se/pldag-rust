@@ -1,276 +1,272 @@
-# Propositional Logic Directed Acyclic Graph (PL‑DAG)
+# Propositional Logic Directed Acyclic Graph (PL-DAG)
 
-A PL-DAG is a directed acyclic graph where each leaf defines a discrete integer domain (e.g., x ∈ [-5, 3]) and each internal node defines a linear inequality over its predecessors. The graph therefore represents a structured system of discrete constraints, allowing arbitrary compositions of integer ranges and linear relations while naturally sharing repeated sub-expressions.
+A PL-DAG is a directed acyclic graph for representing many related discrete logic models in one shared structure. Each leaf defines a discrete integer variable domain, and each internal node defines a reusable derived variable constrained by a linear relation over its input variables.
 
-PL-DAGs are especially well suited for describing and solving discrete optimization problems—problems where you want to make the best possible choice under a set of rules.
-Typical examples include:
+Instead of building a one-off optimization model, solving it, and then throwing it away or caching the result, a PL-DAG lets you keep the underlying logical structure alive as a modular graph. Large domains can be represented once, shared across use cases, and sliced into smaller computation-ready subgraphs when needed.
 
-- Choosing the best product configuration given technical constraints
+This makes PL-DAG useful as an abstraction layer above traditional ILP modelling. You can store commercial rules, technical rules, product baselines, feature dependencies, capacity constraints, and other logical representations in the same graph without having to compute over the whole thing every time.
 
-- Optimizing costs or performance while respecting limits
+The central operation is `sub_dag`: given one or more nodes of interest, it extracts only the transitive dependency graph needed for that computation. That slice can then be used for bound propagation or exported to a polyhedral form your favourite ILP solver can consume.
 
-- Selecting combinations of components that must work together
+PL-DAGs are especially useful when a domain contains many overlapping logical models:
 
-- Modeling resource limits, capacities, or integer-valued decisions
+- product configurations split by year, model, trim, market, or baseline
+- commercial and technical/BOM layers that need to coexist
+- feature toggles and dependency systems shared across many products
+- capacity, compatibility, and selection rules reused in many contexts
+- cross-model questions that are hard to ask when each model is built and solved in isolation
 
-- Exploring what combinations of values are feasible or optimal
-
-Because the PL-DAG breaks everything into small, reusable pieces, it becomes easy to build complex models from simple parts and to solve them with efficient algorithms.
+By breaking logic into small reusable nodes, a single PL-DAG can hold millions of nodes spanning a whole domain. Ordinary computations still operate on small extracted subgraphs, while broader questions can cross boundaries that would otherwise live in separate models.
 
 ---
 
-## ✨ Key Features
+## ✨ Key Features
 
-| Area                   | What you get                                                                                                |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------- |
-| **Modelling**          | Build Boolean/linear constraint systems in a single graph representation.                                   |
-| **Analysis**           | Fast bound‑propagation (`propagate*`).                    |
-| **Export**             | `to_sparse_polyhedron()` generates a polyhedral ILP model ready for any solver.                             |
-| **🧩 Optional solver** | Turn on the `glpk` feature to link against [GLPK](https://www.gnu.org/software/glpk/) and solve in‑process. |
+| Area              | What you get                                                                                              |
+| ----------------- | --------------------------------------------------------------------------------------------------------- |
+| **Modelling**     | Build Boolean / linear constraint systems in a single graph representation.                               |
+| **Async storage** | Mutating and storage-touching methods are `async fn`, so you can plug in any backend (Postgres, Redis, …).|
+| **Analysis**      | Efficient bound propagation over compiled DAG snapshots.                                                  |
+| **Export**        | `to_sparse_polyhedron()` emits a polyhedral ILP model ready for any external solver (GLPK, CPLEX, Gurobi).|
+
+---
+
+## Typical Workflow
+
+You keep **one big graph** that can hold millions of nodes representing all sorts of things in your domain — products, rules, capacities, feature flags — and pull out just the slice you need, whenever you need it.
+
+The everyday loop is three steps:
+
+1. **Populate** — grow the DAG using `set_primitive`, `set_or`, `set_atleast`, … Do it once, or keep adding to it as your domain evolves.
+2. **Sub-DAG** — pick a node you care about and call `pldag.sub_dag(vec![node_id]).await?`. You get back a self-contained `CompiledDag` of just the subgraph rooted at that node.
+3. **Compute** — run `propagate`, `to_sparse_polyhedron`, or any other analysis on that snapshot.
+
+```rust
+// 1. Populate (once, or as your domain evolves)
+pldag.set_primitive("x", (0, 1)).await?;
+pldag.set_primitive("y", (0, 1)).await?;
+let root = pldag.set_or(vec!["x", "y"]).await?;
+
+// 2. Pick a node of interest, get its sub-DAG
+let dag = pldag.sub_dag(vec![root.clone()]).await?;
+
+// 3. Compute on it
+let bounds = dag.propagate([("x", (1, 1))])?;
+```
+
+That's it. The same PL-DAG can back any number of these slices, so a single shared model serves many use cases at once.
 
 ---
 
 ## Install
 
-### 1  — Modelling‑only (MIT licence)
-
 ```bash
 cargo add pldag
 ```
 
-This pulls *no* GPL code; you can ship the resulting binary under any licence compatible with MIT.
-
-### 2  — Modelling **+** in‑process GLPK solver (GPL v3+ applies)
+You will also need an async runtime to drive the model-building calls. The examples below use [`tokio`](https://crates.io/crates/tokio):
 
 ```bash
-cargo add pldag --features glpk
+cargo add tokio --features rt-multi-thread,macros
 ```
 
-Enabling the `glpk` feature links to the GNU Linear Programming Kit (GLPK). If you **distribute** a binary built with this feature you must meet the requirements of the GPL‑3.0‑or‑later.
+---
 
-> **Heads‑up:** Leaving the feature off keeps *all* code MIT‑licensed. The choice is completely under your control at `cargo build` time.
+## Architecture
+
+A `Pldag` is a thin wrapper around a pluggable storage backend. The storage holds the DAG topology; the `Pldag` exposes the modelling API on top of it.
+
+```
+┌──────────────┐       ┌────────────────┐       ┌──────────────────┐
+│    Pldag     │ ──►   │ NodeStoreTrait │ ──►   │  KeyValueStore   │
+│  (modelling) │       │   (DAG ops)    │       │ (bytes / values) │
+└──────────────┘       └────────────────┘       └──────────────────┘
+                                                         │
+                                                         ▼
+                                          InMemoryStore  /  Your DB
+```
+
+- `KeyValueStore` is the low-level async key/value contract.
+- `NodeStoreTrait` layers DAG-specific operations (parents, children, primitives) on top.
+- `InMemoryStore` is the default backend (`std::sync::RwLock` under the hood). For a custom backend, implement the two traits and pass it via `Pldag::new_custom`.
+
+Because the traits are async, you can back the DAG with any database that has an async client.
 
 ---
 
 ## Core Routines
 
-### Analysis & Propagation
-
-#### `propagate`
+### Building the model
 
 ```rust
-fn propagate<K>(
+async fn set_primitive(&self, id: &str, bound: Bound) -> Result<ID>;
+async fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
+where K: ToString;
+```
+
+Create primitive (leaf) variables with specified bounds.
+
+```rust
+async fn set_gelineq<K>(
     &self,
-    assignment: impl IntoIterator<Item = (K, Bound)>
-) -> Result<Assignment>
-where K: ToString;
-```
-
-*Propagates bounds bottom‑up through the DAG and returns a map of node → bound (`(min, max)`).*
-
-#### `propagate_default`
-
-```rust
-fn propagate_default(&self) -> Result<Assignment>;
-```
-
-*Convenience method that propagates using default bounds of all primitive variables.*
-
-### Building the Model
-
-#### Primitive Variables
-
-```rust
-fn set_primitive(&mut self, id: &str, bound: Bound);
-fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound)
-where K: ToString;
-```
-
-*Create primitive (leaf) variables with specified bounds. `set_primitives` creates multiple variables with the same bounds.*
-
-#### Linear Constraints
-
-```rust
-fn set_gelineq<K>(
-    &mut self,
     coefficient_variables: impl IntoIterator<Item = (K, i32)>,
-    bias: i32
-) -> ID
+    bias: i32,
+) -> Result<ID>
 where K: ToString;
 ```
 
-*Creates a general linear inequality: `sum(coeff_i * var_i) + bias >= 0`.*
+Creates a general linear inequality: `sum(coeff_i * var_i) + bias >= 0`.
 
 ```rust
-fn set_atleast<K>(&mut self, references: impl IntoIterator<Item = K>, value: i32) -> ID
-where K: ToString;
-
-fn set_atmost<K>(&mut self, references: impl IntoIterator<Item = K>, value: i32) -> ID
-where K: ToString;
-
-fn set_equal<K, I>(&mut self, references: I, value: i32) -> ID
-where K: ToString, I: IntoIterator<Item = K> + Clone;
+async fn set_atleast<K>(&self, references: impl IntoIterator<Item = K>, value: i32) -> Result<ID>;
+async fn set_atmost<K>(&self, references: impl IntoIterator<Item = K>, value: i32) -> Result<ID>;
+async fn set_equal<K, I>(&self, references: I, value: i32) -> Result<ID>;
 ```
 
-*`set_atleast`: Creates `sum(variables) >= value`*
-*`set_atmost`: Creates `sum(variables) <= value`*
-*`set_equal`: Creates `sum(variables) == value`*
+`sum(vars) >= value`, `sum(vars) <= value`, `sum(vars) == value`.
 
-#### Logical Constraints
+#### Logical constraints
 
 ```rust
-fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
-
-fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
-
-fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
-
-fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
-
-fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
-
-fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
-
-fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> ID
-where K: ToString;
+async fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
+async fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> Result<ID>;
+async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> Result<ID>;
 ```
 
-*Standard logical operations:*
-- `set_and`: ALL variables must be true
-- `set_or`: AT LEAST ONE variable must be true
-- `set_not`: NONE of the variables can be true
-- `set_xor`: EXACTLY ONE variable must be true
-- `set_nand`: NOT ALL variables can be true
-- `set_nor`: NONE of the variables can be true
-- `set_xnor`: EVEN NUMBER of variables must be true (including zero)
+- `set_and`: True iff all input variables are true.
+- `set_or`: True iff at least one input variable is true.
+- `set_not`: True iff the input variable is false.
+- `set_xor`: True iff exactly one input variable is true.
+- `set_nand`: True iff not all input variables are true.
+- `set_nor`: True iff no input variables are true.
+- `set_xnor`: True iff not exactly one input variable is true.
+- `set_imply`: True iff the condition being true requires the consequence to be true. Equivalent to `!condition OR consequence`.
+- `set_equiv`: True iff `lhs` and `rhs` have the same Boolean value.
+
+#### Inspection / removal
 
 ```rust
-fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> ID
-where C: ToString, Q: ToString;
-
-fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> ID
-where L: ToString, R: ToString;
+async fn get_node(&self, id: &str) -> Result<Option<Node>>;
+async fn get_nodes(&self, ids: &[String]) -> Result<HashMap<String, Node>>;
+async fn delete_node(&self, id: &str) -> Result<()>;
 ```
 
-*`set_imply`: Creates `condition → consequence` (implication)*
-*`set_equiv`: Creates `lhs ↔ rhs` (equivalence/biconditional)*
+`delete_node` errors with `PldagError::NodeReferenced` if other nodes still depend on the target.
 
-### Export & Solving
-
-#### `to_sparse_polyhedron`
+### Snapshotting & analysis
 
 ```rust
-fn to_sparse_polyhedron(
+async fn dag(&self) -> Result<CompiledDag>;
+async fn sub_dag(&self, roots: Vec<ID>) -> Result<CompiledDag>;
+```
+
+`dag` snapshots the entire DAG; `sub_dag` snapshots only the subgraph reachable from `roots` (or the entire DAG if `roots` is empty).
+
+Once you hold a `CompiledDag`, all further analyses are synchronous:
+
+```rust
+fn CompiledDag::propagate<K>(
     &self,
-    roots: Vec<ID>,
-    double_binding: bool
-) -> SparsePolyhedron;
+    assignments: impl IntoIterator<Item = (K, Bound)>,
+) -> Result<HashMap<String, Bound>>;
+
+fn Pldag::propagate_dag<K>(
+    dag: &CompiledDag,
+    assignments: impl IntoIterator<Item = (K, Bound)>,
+) -> Result<Assignment>;
 ```
 
-*Emits a sparse polyhedral representation suitable for ILP solvers (GLPK, CPLEX, Gurobi, …).*
-*`SparsePolyhedron` implements `serde::Serialize`, so you can ship it over HTTP to a remote solver service if you prefer.*
+`Pldag::propagate(&self, ...)` is an async convenience wrapper that snapshots and computes in one call.
 
-#### `solve` (Optional GLPK Feature)
+### Export
 
 ```rust
-#[cfg(feature = "glpk")]
-fn solve(
-    &self,
-    roots: Vec<ID>,
-    objectives: Vec<HashMap<&str, f64>>,
-    assume: HashMap<&str, Bound>,
-    maximize: bool
-) -> Vec<Option<Assignment>>;
+fn Pldag::to_sparse_polyhedron(cd: &CompiledDag, double_binding: bool) -> Result<SparsePolyhedron>;
+fn Pldag::to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> Result<DensePolyhedron>;
 ```
 
-*Solves integer linear programming problems using GLPK. Takes multiple objective functions, fixed variable assumptions, and returns optimal assignments.*
+Both `SparsePolyhedron` and `DensePolyhedron` implement `serde::Serialize`, so you can ship them over HTTP to a remote ILP service or hand them to any in-process solver of your choice.
 
 ---
 
 ## Quick Example
 
 ```rust
-use indexmap::IndexMap;
-use pldag::{Pldag, Bound};
-
-// Build a simple OR‑of‑three model
-let mut pldag = Pldag::new();
-pldag.set_primitive("x", (0, 1));
-pldag.set_primitive("y", (0, 1));
-pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(vec!["x", "y", "z"]);
-
-// Validate a combination
-let validated = pldag.propagate_default().unwrap();
-println!("root bound = {:?}", validated[&root]);
-```
-
-### 3. Solving with GLPK (Optional Feature)
-
-When the `glpk` feature is enabled, you can solve optimization problems directly:
-
-```rust
-#[cfg(feature = "glpk")]
 use std::collections::HashMap;
-use pldag::{Pldag, Bound};
+use pldag::{Bound, Pldag};
 
-// Build a simple problem: maximize x + 2y + 3z subject to x ∨ y ∨ z
-let mut pldag = Pldag::new();
-pldag.set_primitive("x", (0, 1));
-pldag.set_primitive("y", (0, 1));
-pldag.set_primitive("z", (0, 1));
-let root = pldag.set_or(vec!["x", "y", "z"]);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a simple OR‑of‑three model
+    let pldag = Pldag::new();
+    pldag.set_primitive("x", (0, 1)).await?;
+    pldag.set_primitive("y", (0, 1)).await?;
+    pldag.set_primitive("z", (0, 1)).await?;
+    let root = pldag.set_or(vec!["x", "y", "z"]).await?;
 
-// Set up the objective function: maximize x + 2y + 3z
-let mut objective = HashMap::new();
-objective.insert("x", 1.0);
-objective.insert("y", 2.0);
-objective.insert("z", 3.0);
+    // Snapshot the DAG once, then analyse synchronously.
+    let dag = pldag.dag().await?;
 
-// Constraints: require that the OR constraint is satisfied
-let mut assumptions = HashMap::new();
-assumptions.insert(&root, (1, 1)); // root must be true
+    // 1. With no assignments, the OR's bound is undetermined: (0, 1).
+    let bounds = dag.propagate(Vec::<(&str, Bound)>::new())?;
+    assert_eq!(bounds[&root], (0, 1));
 
-// Solve the optimization problem
-let solutions = pldag.solve(vec![root.clone()], vec![objective], assumptions, true);
+    // 2. Pinning y = 1 forces the OR to true.
+    let mut assignments: HashMap<&str, Bound> = HashMap::new();
+    assignments.insert("y", (1, 1));
+    let bounds = dag.propagate(assignments)?;
+    assert_eq!(bounds[&root], (1, 1));
 
-if let Some(solution) = &solutions[0] {
-    println!("Optimal solution found:");
-    println!("x = {:?}", solution.get("x"));
-    println!("y = {:?}", solution.get("y"));
-    println!("z = {:?}", solution.get("z"));
-    println!("root = {:?}", solution.get(&root));
-} else {
-    println!("No feasible solution found");
+    Ok(())
 }
 ```
 
-This example demonstrates:
-- **Problem setup**: Creating boolean variables and logical constraints
-- **Objective function**: Defining what to optimize (maximize x + 2y + 3z)
-- **Assumptions**: Fixing certain variables or constraints (root must be true)
-- **Solving**: Using GLPK to find the optimal solution
-- **Result interpretation**: Extracting variable values from the solution
+---
+
+## Custom Storage Backend
+
+Plug in your own database by implementing the two storage traits:
+
+```rust
+use async_trait::async_trait;
+use pldag::{KeyValueStore, NodeStore, Pldag, StorageResult};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+struct MyDbStore { /* connection pool, etc. */ }
+
+#[async_trait]
+impl KeyValueStore for MyDbStore {
+    async fn get(&self, key: &str) -> StorageResult<Option<Value>> { /* … */ }
+    async fn set(&self, key: &str, value: Value) -> StorageResult<()> { /* … */ }
+    // … the rest of the trait
+}
+
+#[tokio::main]
+async fn main() {
+    let kv: Arc<dyn KeyValueStore> = Arc::new(MyDbStore { /* … */ });
+    let pldag = Pldag::new_custom(Arc::new(NodeStore::new(kv)));
+    // build, query, snapshot — all backed by your DB.
+}
+```
+
+`NodeStore` is the default `NodeStoreTrait` implementation layered on top of any `KeyValueStore`; if you want to override the DAG-level behaviour as well, implement `NodeStoreTrait` directly.
 
 ---
 
 ## Notes
 
-- All `set_*` functions accept any iterable type that can be converted to strings via the `ToString` trait, providing maximum flexibility.
+- All `set_*` functions accept any iterable type whose items implement `ToString`.
+- `Pldag::new()` returns a model backed by an in-memory store. Use `Pldag::new_custom(store)` to provide your own backend.
+- Storage failures surface as `PldagError::Storage(StorageError)`.
 
 ## License
 
-* **Library code:** MIT (permissive).
-* **Optional solver:** If you build with `--features glpk`, you link against GLPK, which is **GPL‑3.0‑or‑later**. Distributing such a binary triggers the GPL’s obligations.
-
-You choose the trade‑off: leave the feature off for a fully permissive dependency tree, or enable it for a batteries‑included ILP solver.
-
----
-
-Enjoy building and evaluating logical models with PL‑DAG! 🎉
+MIT.

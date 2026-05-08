@@ -3,9 +3,59 @@ use std::fmt;
 /// Result type alias for pldag operations
 pub type Result<T> = std::result::Result<T, PldagError>;
 
+/// Result alias used by storage backends.
+pub type StorageResult<T> = std::result::Result<T, StorageError>;
+
+/// Errors raised by storage backend implementations.
+///
+/// Backends should convert their native errors (database, network, serialization
+/// failures) into one of these variants. The `Backend` variant is intended as a
+/// catch-all for transport-level failures; prefer the more specific variants
+/// when applicable.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StorageError {
+    /// A backend-level error such as a connection failure or query error.
+    Backend { message: String },
+
+    /// A value retrieved from the backend could not be deserialized into the
+    /// expected shape (e.g. malformed JSON, schema drift).
+    Deserialization { key: String, message: String },
+
+    /// A value could not be serialized for storage.
+    Serialization { key: String, message: String },
+}
+
+impl StorageError {
+    pub fn backend(message: impl Into<String>) -> Self {
+        StorageError::Backend { message: message.into() }
+    }
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::Backend { message } => {
+                write!(f, "Storage backend error: {}", message)
+            }
+            StorageError::Deserialization { key, message } => {
+                write!(f, "Failed to deserialize value for key '{}': {}", key, message)
+            }
+            StorageError::Serialization { key, message } => {
+                write!(f, "Failed to serialize value for key '{}': {}", key, message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
+
 /// Error types that can occur during pldag operations
 #[derive(Debug, Clone, PartialEq)]
 pub enum PldagError {
+
+    /// A constraint was created with no coefficient variables, which is invalid
+    EmptyConstraint,
+
     /// A cycle was detected in the DAG, which violates the acyclic property
     CycleDetected {
         node_id: String,
@@ -33,11 +83,21 @@ pub enum PldagError {
         node_id: String,
         referencing_nodes: Vec<String>,
     },
+
+    /// An error originating from the storage backend.
+    Storage(StorageError),
+}
+
+impl From<StorageError> for PldagError {
+    fn from(err: StorageError) -> Self {
+        PldagError::Storage(err)
+    }
 }
 
 impl fmt::Display for PldagError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            PldagError::EmptyConstraint => write!(f, "Constraint cannot be empty; at least one coefficient is required"),
             PldagError::CycleDetected { node_id } => {
                 write!(f, "Cycle detected in DAG at node '{}'", node_id)
             }
@@ -68,6 +128,7 @@ impl fmt::Display for PldagError {
                     node_id, referencing_nodes
                 )
             }
+            PldagError::Storage(err) => write!(f, "{}", err),
         }
     }
 }
