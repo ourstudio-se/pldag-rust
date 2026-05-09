@@ -122,9 +122,13 @@ impl NodeStoreTrait for NodeStore {
             .await?;
         let mut out = HashMap::with_capacity(raw.len());
         for (id, value) in raw {
-            if let Ok(node) = serde_json::from_value::<Node>(value) {
-                out.insert(id, node);
-            }
+            let node = serde_json::from_value::<Node>(value).map_err(|e| {
+                StorageError::Deserialization {
+                    key: id.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            out.insert(id, node);
         }
         Ok(out)
     }
