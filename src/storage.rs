@@ -234,7 +234,12 @@ impl NodeStoreTrait for NodeStore {
         let mut result: HashMap<String, Vec<String>> = HashMap::with_capacity(ids.len());
         for (key, refs) in raw {
             let original = key["__outgoing__".len()..].to_string();
-            let parsed: Vec<String> = serde_json::from_value(refs).unwrap_or_else(|_| Vec::new());
+            let parsed: Vec<String> = serde_json::from_value(refs).map_err(|e| {
+                StorageError::Deserialization {
+                    key: key.clone(),
+                    message: e.to_string(),
+                }
+            })?;
             result.insert(original, parsed);
         }
 
