@@ -705,31 +705,72 @@ pub enum Node {
     Primitive(Bound),
 }
 
+/// The kind of a node in a [`CompiledDag`].
+///
+/// Each node is either a leaf (a primitive variable with declared bounds) or
+/// a composite (a linear-combination constraint over other nodes).
 #[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub enum Kind {
-    Primitive { inherent: Bound },
-    Composite { bias_lo: i32, coef_range: (usize, usize) }, // range into flat coef vec
+    /// A leaf variable with a declared inherent bound `(lower, upper)`.
+    Primitive {
+        /// The intrinsic bound the variable is allowed to take.
+        inherent: Bound,
+    },
+    /// A composite (linear-combination) constraint.
+    ///
+    /// Evaluates as `sum(coef_i * value_i) + bias_lo >= 0`, where the
+    /// `(coef_i, value_i)` pairs are the slice `coefs[start..end]` of the
+    /// owning [`CompiledDag`].
+    Composite {
+        /// Constant additive term applied before the `>= 0` test.
+        bias_lo: i32,
+        /// Half-open `[start, end)` range into the parent DAG's flat
+        /// [`coefs`](CompiledDag::coefs) vector.
+        coef_range: (usize, usize),
+    },
 }
 
+/// A single `(input_index, coefficient)` term inside a composite constraint.
+///
+/// Composite nodes in a [`CompiledDag`] reference these via a half-open
+/// [`Kind::Composite::coef_range`] into the flat [`CompiledDag::coefs`] array.
 #[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub struct Coef {
+    /// Dense index of the input node in the parent [`CompiledDag`].
     pub input: u32,
+    /// The coefficient applied to that input.
     pub coef: i32,
 }
 
+/// A compact, indexed snapshot of a [`Pldag`], optimised for fast propagation.
+///
+/// Build one with [`Pldag::dag`] (or directly with [`CompiledDag::compile`])
+/// and then call [`CompiledDag::propagate`] (or
+/// [`CompiledDag::propagate_with_scratch`] in hot loops).
+///
+/// The fields are public to support advanced consumers (custom traversals,
+/// custom polyhedron encodings) but should be treated as a read-only,
+/// internally-consistent representation. Mutating them out-of-band may
+/// produce undefined behaviour at the API level.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CompiledDag {
-    // Map external string id -> dense int id
+    /// Map from external string id to the dense `u32` index used internally.
     pub id_to_ix: HashMap<String, u32>,
-    pub ix_to_id: Vec<String>, // only needed if you want string outputs / debugging
+    /// Reverse of [`id_to_ix`](Self::id_to_ix); used to render outputs back as strings.
+    pub ix_to_id: Vec<String>,
 
+    /// The [`Kind`] of each node, indexed by dense id.
     pub kind: Vec<Kind>,
+    /// Flat backing storage for all composite-node coefficient terms.
+    /// Each composite slices into this via its [`Kind::Composite::coef_range`].
     pub coefs: Vec<Coef>,
 
-    // reverse deps: for each node, which composites depend on it?
+    /// Reverse-dependency lists: for each node, the dense ids of composites
+    /// that consume it as an input. Used by propagation to wake parents.
     pub parents: Vec<Vec<u32>>,
 
-    // for each composite node: number of inputs it requires
+    /// For each composite node, the number of inputs it has. Indexed by dense
+    /// id; entries for primitive nodes are `0`.
     pub input_count: Vec<u32>,
 }
 
@@ -1145,6 +1186,10 @@ impl Pldag {
         }
     }
 
+    /// Creates a new PL-DAG backed by a caller-supplied [`NodeStoreTrait`].
+    ///
+    /// Use this to plug in a database-backed or otherwise-customised storage
+    /// layer instead of the default in-memory store.
     pub fn new_custom(storage: Arc<dyn NodeStoreTrait>) -> Pldag {
         Pldag { storage, validate_coeffs: true }
     }
@@ -1255,6 +1300,16 @@ impl Pldag {
         Ok(result)
     }
 
+    /// Returns a smaller [`CompiledDag`] with the given variables substituted by constants.
+    ///
+    /// Each node listed in `fixed` is removed from the DAG, and every composite
+    /// that referenced it has the substituted contribution folded into its
+    /// `bias_lo` term. Use this to specialise a generic model for a specific
+    /// scenario before propagating or solving.
+    ///
+    /// # Arguments
+    /// * `dag` — the source DAG to reduce.
+    /// * `fixed` — mapping from node id to the integer value to substitute.
     pub fn reduce(
         dag: &CompiledDag,
         fixed: &HashMap<String, i32>,
@@ -1546,6 +1601,12 @@ impl Pldag {
         Ok(result)
     }
 
+    /// Returns the node ids of `dag` in topological order.
+    ///
+    /// Producers (primitives, plus composites whose inputs are already settled)
+    /// appear before their consumers. The pre-built `dependency_map` —
+    /// typically obtained from [`Pldag::dependency_map`] — is supplied
+    /// separately to avoid recomputing it across calls.
     pub fn topological_sort(
         dag: &HashMap<ID, Node>,
         dependency_map: &HashMap<ID, Vec<ID>>,
@@ -1591,6 +1652,11 @@ impl Pldag {
         Ok(result)
     }
 
+    /// Builds the child-id map for a raw `(id -> Node)` view of a DAG.
+    ///
+    /// For each node, the returned map lists the ids of nodes it depends on:
+    /// composite nodes list their coefficient inputs; primitive nodes map to
+    /// an empty list. This is the input expected by [`Pldag::topological_sort`].
     pub fn dependency_map(dag: &HashMap<ID, Node>) -> HashMap<ID, Vec<ID>> {
         dag.iter()
             .map(|(node_id, node)| {
@@ -1668,6 +1734,12 @@ impl Pldag {
         Ok(CompiledDag::compile(nodes))
     }
 
+    /// Compiles the entire model into a [`CompiledDag`].
+    ///
+    /// This is the recommended starting point for evaluation: build your
+    /// model with `set_*` methods, call `dag()` once, then propagate or
+    /// solve against the resulting compact representation as many times as
+    /// you like. See [`Pldag::sub_dag`] to compile only a subset.
     pub async fn dag(&self) -> Result<CompiledDag> {
         let all_nodes = self.storage.get_all_nodes().await?.into_iter().collect::<Vec<_>>();
         Ok(CompiledDag::compile(all_nodes))
@@ -2033,6 +2105,12 @@ impl Pldag {
         self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value).await
     }
 
+    /// Like [`Pldag::set_atleast`], but the threshold is itself a node reference.
+    ///
+    /// Encodes `sum(references) >= value`, where `value` is the id of an
+    /// existing node whose current bound is used as the threshold. Useful
+    /// for expressing data-driven constraints where the right-hand side is
+    /// not known statically.
     pub async fn set_atleast_ref<K, V>(
         &self,
         references: impl IntoIterator<Item = K>,
@@ -2070,6 +2148,10 @@ impl Pldag {
         self.set_gelineq(references.into_iter().map(|x| (x, -1)), value).await
     }
 
+    /// Like [`Pldag::set_atmost`], but the cap is itself a node reference.
+    ///
+    /// Encodes `sum(references) <= value`, where `value` is the id of an
+    /// existing node whose current bound is used as the cap.
     pub async fn set_atmost_ref<K, V>(
         &self,
         references: impl IntoIterator<Item = K>,
@@ -2112,6 +2194,10 @@ impl Pldag {
         self.set_and(vec![ub, lb]).await
     }
 
+    /// Like [`Pldag::set_equal`], but the target sum is itself a node reference.
+    ///
+    /// Encodes `sum(references) == value` by conjoining `set_atleast_ref` and
+    /// `set_atmost_ref` against the same `value` node.
     pub async fn set_equal_ref<K, V, I>(
         &self,
         references: I,

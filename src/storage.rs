@@ -76,11 +76,18 @@ pub trait NodeStoreTrait: Send + Sync {
     fn get_kv_store(&self) -> &dyn KeyValueStore;
 }
 
+/// Default [`NodeStoreTrait`] implementation, layered on top of any [`KeyValueStore`].
+///
+/// `NodeStore` handles JSON (de)serialization of [`Node`] values and tracks
+/// the reverse-edge "outgoing" rows used to support efficient deletions and
+/// parent lookups. Pair it with [`InMemoryStore`] for tests, or with a
+/// custom backend (e.g. Redis, Postgres, S3) for persistence.
 pub struct NodeStore {
     data: Arc<dyn KeyValueStore>,
 }
 
 impl NodeStore {
+    /// Wraps an existing [`KeyValueStore`] in a [`NodeStore`].
     pub fn new(store: Arc<dyn KeyValueStore>) -> Self {
         Self { data: store }
     }

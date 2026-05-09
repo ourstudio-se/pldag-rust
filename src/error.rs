@@ -15,17 +15,31 @@ pub type StorageResult<T> = std::result::Result<T, StorageError>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum StorageError {
     /// A backend-level error such as a connection failure or query error.
-    Backend { message: String },
+    Backend {
+        /// Human-readable description of the failure.
+        message: String,
+    },
 
     /// A value retrieved from the backend could not be deserialized into the
     /// expected shape (e.g. malformed JSON, schema drift).
-    Deserialization { key: String, message: String },
+    Deserialization {
+        /// The storage key whose value failed to deserialize.
+        key: String,
+        /// Human-readable description of the failure.
+        message: String,
+    },
 
     /// A value could not be serialized for storage.
-    Serialization { key: String, message: String },
+    Serialization {
+        /// The storage key whose value failed to serialize.
+        key: String,
+        /// Human-readable description of the failure.
+        message: String,
+    },
 }
 
 impl StorageError {
+    /// Convenience constructor for [`StorageError::Backend`] from any string-like value.
     pub fn backend(message: impl Into<String>) -> Self {
         StorageError::Backend { message: message.into() }
     }
@@ -58,29 +72,37 @@ pub enum PldagError {
 
     /// A cycle was detected in the DAG, which violates the acyclic property
     CycleDetected {
+        /// The id of a node that participates in the cycle.
         node_id: String,
     },
 
     /// A referenced node was not found in the storage
     NodeNotFound {
+        /// The id that was looked up but not present.
         node_id: String,
     },
 
-    // Node out of bounds error
+    /// A propagation assignment violated a primitive's declared inherent bound.
     NodeOutOfBounds {
+        /// The id of the offending primitive node.
         node_id: String,
+        /// The bound supplied by the caller.
         got_bound: (i32, i32),
+        /// The inherent bound declared on the primitive.
         expected_bound: (i32, i32),
     },
 
-    // Max iterations exceeded during tightening
+    /// The bound-tightening loop did not converge before the iteration cap.
     MaxIterationsExceeded {
+        /// The configured iteration cap that was exceeded.
         max_iters: usize,
     },
 
-    // When deleting a node that is referenced by other nodes
+    /// A delete was attempted on a node that other nodes still reference.
     NodeReferenced {
+        /// The id of the node whose deletion was rejected.
         node_id: String,
+        /// Ids of nodes that still hold references to `node_id`.
         referencing_nodes: Vec<String>,
     },
 
