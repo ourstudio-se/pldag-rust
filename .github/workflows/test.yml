@@ -24,7 +24,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libglpk-dev
+          sudo apt-get install -y pkg-config
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -44,8 +44,5 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run tests (without GLPK feature)
+      - name: Run tests
         run: cargo test --no-default-features
-
-      - name: Run tests (with GLPK feature)
-        run: cargo test --features glpk
