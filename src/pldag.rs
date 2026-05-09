@@ -733,6 +733,45 @@ pub struct CompiledDag {
     pub input_count: Vec<u32>,
 }
 
+/// Reusable scratch buffers for [`CompiledDag::propagate_with_scratch`].
+///
+/// Allocate once with [`Scratch::new`] and reuse across many calls — including
+/// across DAGs of different sizes — to amortise the per-call allocation cost.
+/// Backing capacity grows as needed and is never shrunk.
+#[derive(Debug, Default, Clone)]
+pub struct Scratch {
+    known: Vec<bool>,
+    values: Vec<Bound>,
+    missing: Vec<u32>,
+    assigned: Vec<bool>,
+    queue: VecDeque<u32>,
+}
+
+impl Scratch {
+    /// Creates a new empty scratch buffer set. The first call to
+    /// [`CompiledDag::propagate_with_scratch`] will grow it to the DAG size.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resize all buffers to length `n` and reset their contents. Backing
+    /// capacity is reused; never shrunk.
+    fn prepare(&mut self, n: usize) {
+        self.known.clear();
+        self.known.resize(n, false);
+        self.values.clear();
+        self.values.resize(n, (0, 0));
+        self.missing.clear();
+        self.missing.resize(n, 0);
+        self.assigned.clear();
+        self.assigned.resize(n, false);
+        self.queue.clear();
+        if self.queue.capacity() < n {
+            self.queue.reserve(n - self.queue.capacity());
+        }
+    }
+}
+
 impl Default for CompiledDag {
     fn default() -> Self {
         Self::new()
@@ -915,6 +954,8 @@ impl CompiledDag {
     /// Propagate with new assignments.
     ///
     /// Pure compute over the compiled topology — does not mutate `self`.
+    /// Allocates fresh scratch buffers each call; for hot loops, prefer
+    /// [`CompiledDag::propagate_with_scratch`] to reuse buffers.
     pub fn propagate<K>(
         &self,
         assignments: impl IntoIterator<Item = (K, Bound)>,
@@ -922,13 +963,28 @@ impl CompiledDag {
     where
         K: ToString,
     {
-        let n = self.kind.len();
+        let mut scratch = Scratch::new();
+        self.propagate_with_scratch(assignments, &mut scratch)
+    }
 
-        // Local scratch buffers — sized to the DAG so direct indexing is safe.
-        let mut known: Vec<bool> = vec![false; n];
-        let mut values: Vec<Bound> = vec![(0, 0); n];
-        let mut missing: Vec<u32> = vec![0; n];
-        let mut queue: VecDeque<u32> = VecDeque::with_capacity(n);
+    /// Propagate with new assignments, reusing the storage in `scratch`.
+    ///
+    /// Equivalent to [`CompiledDag::propagate`], but reuses the buffers in
+    /// `scratch` instead of allocating fresh ones. The same `Scratch` may be
+    /// reused across many calls, including across DAGs of different sizes —
+    /// it is grown as needed and reset on entry.
+    pub fn propagate_with_scratch<K>(
+        &self,
+        assignments: impl IntoIterator<Item = (K, Bound)>,
+        scratch: &mut Scratch,
+    ) -> Result<HashMap<String, Bound>>
+    where
+        K: ToString,
+    {
+        let n = self.kind.len();
+        scratch.prepare(n);
+
+        let Scratch { known, values, missing, assigned, queue } = scratch;
 
         // missing starts as input_count for composites, 0 for primitives
         for i in 0..n {
@@ -937,10 +993,6 @@ impl CompiledDag {
                 Kind::Primitive { .. } => 0,
             };
         }
-
-        // Track which nodes were given an explicit assignment, so we can validate
-        // bounds for primitives and skip recomputing them.
-        let mut assigned = vec![false; n];
 
         for (k, b) in assignments.into_iter() {
             let s = k.to_string();
@@ -2451,6 +2503,66 @@ mod tests {
         assert!(!result.contains_key(&or_2));
         assert!(!result.contains_key(&or_3));
         assert!(!result.contains_key(&root));
+    }
+
+    #[tokio::test]
+    async fn test_propagate_with_scratch_reuse_across_dags() {
+        // Build two DAGs of different sizes and run propagate_with_scratch
+        // against the same Scratch buffer; results must match a fresh
+        // CompiledDag::propagate call. This exercises the grow-only resize
+        // path and verifies no state leaks between calls.
+        let small = Pldag::new();
+        let _ = small.set_primitive("a", (0, 1)).await;
+        let _ = small.set_primitive("b", (0, 1)).await;
+        let small_root = small.set_and(vec!["a", "b"]).await.unwrap();
+        let small_dag = small.dag().await.unwrap();
+
+        let large = Pldag::new();
+        let _ = large.set_primitive("p", (0, 1)).await;
+        let _ = large.set_primitive("q", (0, 1)).await;
+        let _ = large.set_primitive("r", (0, 1)).await;
+        let _ = large.set_primitive("s", (0, 1)).await;
+        let or_pq = large.set_or(vec!["p", "q"]).await.unwrap();
+        let or_rs = large.set_or(vec!["r", "s"]).await.unwrap();
+        let large_root = large.set_and(vec![or_pq, or_rs]).await.unwrap();
+        let large_dag = large.dag().await.unwrap();
+
+        let mut scratch = Scratch::new();
+
+        // First call: small DAG, both primitives = 1.
+        let mut a1 = HashMap::new();
+        a1.insert("a", (1, 1));
+        a1.insert("b", (1, 1));
+        let with = small_dag
+            .propagate_with_scratch(a1.clone(), &mut scratch)
+            .unwrap();
+        let baseline = small_dag.propagate(a1).unwrap();
+        assert_eq!(with, baseline);
+        assert_eq!(with.get(&small_root).unwrap(), &(1, 1));
+
+        // Second call: larger DAG (grows the buffers), partial assignment.
+        let mut a2 = HashMap::new();
+        a2.insert("p", (1, 1));
+        a2.insert("r", (1, 1));
+        let with = large_dag
+            .propagate_with_scratch(a2.clone(), &mut scratch)
+            .unwrap();
+        let baseline = large_dag.propagate(a2).unwrap();
+        assert_eq!(with, baseline);
+        assert_eq!(with.get(&large_root).unwrap(), &(1, 1));
+
+        // Third call: back to the small DAG with different assignment.
+        // This exercises the case where buffer capacity exceeds the DAG
+        // size — the prefix must be cleanly reset.
+        let mut a3 = HashMap::new();
+        a3.insert("a", (0, 0));
+        a3.insert("b", (1, 1));
+        let with = small_dag
+            .propagate_with_scratch(a3.clone(), &mut scratch)
+            .unwrap();
+        let baseline = small_dag.propagate(a3).unwrap();
+        assert_eq!(with, baseline);
+        assert_eq!(with.get(&small_root).unwrap(), &(0, 0));
     }
 
     /// XOR already covered; test the OR gate

@@ -3,5 +3,5 @@ mod pldag;
 mod storage;
 
 pub use error::{PldagError, Result, StorageError, StorageResult};
-pub use pldag::{ID, Bound, Pldag, Node, Constraint, SparsePolyhedron, DensePolyhedron, CompiledDag, Kind, Coef};
+pub use pldag::{ID, Bound, Pldag, Node, Constraint, SparsePolyhedron, DensePolyhedron, CompiledDag, Kind, Coef, Scratch};
 pub use storage::{InMemoryStore, KeyValueStore, NodeStore, NodeStoreTrait};
