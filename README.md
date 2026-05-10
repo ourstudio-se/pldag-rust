@@ -27,7 +27,7 @@ By breaking logic into small reusable nodes, a single PL-DAG can hold millions o
 | **Modelling**     | Build Boolean / linear constraint systems in a single graph representation.                               |
 | **Async storage** | Mutating and storage-touching methods are `async fn`, so you can plug in any backend (Postgres, Redis, …).|
 | **Analysis**      | Efficient bound propagation over compiled DAG snapshots.                                                  |
-| **Export**        | `to_sparse_polyhedron()` emits a polyhedral ILP model ready for any external solver (GLPK, CPLEX, Gurobi).|
+| **Export**        | `to_sparse_polyhedron()` emits a polyhedral ILP model ready for any external ILP solver.|
 
 ---
 
