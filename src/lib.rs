@@ -30,8 +30,8 @@
 //!
 //! # async fn run() -> pldag::Result<()> {
 //! let model = Pldag::new();
-//! model.set_primitive("a", (0, 1)).await;
-//! model.set_primitive("b", (0, 1)).await;
+//! model.set_primitive("a", (0, 1)).await?;
+//! model.set_primitive("b", (0, 1)).await?;
 //! let root = model.set_and(vec!["a", "b"]).await?;
 //!
 //! // Compile once, propagate many times.
