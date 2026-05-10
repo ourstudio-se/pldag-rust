@@ -3,7 +3,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::pldag::Node;
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Abstract interface for key-value storage backends.
@@ -96,6 +96,32 @@ impl NodeStore {
     pub fn store(&self) -> &dyn KeyValueStore {
         &*self.data
     }
+
+    /// Removes `parent` from each `__outgoing__<child>` row.
+    ///
+    /// Used both when deleting a composite and when overwriting one whose
+    /// coefficient set has shrunk — both leave behind backward-reference
+    /// rows that must be rewritten so `get_parent_ids` doesn't return
+    /// phantom edges.
+    async fn remove_outgoing(&self, child_ids: &[String], parent: &str) -> StorageResult<()> {
+        if child_ids.is_empty() {
+            return Ok(());
+        }
+        let mut current = self.get_parent_ids(child_ids).await?;
+        for child in child_ids {
+            let entry = current.entry(child.clone()).or_default();
+            entry.retain(|ref_id| ref_id != parent);
+            let key = format!("__outgoing__{}", child);
+            let serialized = serde_json::to_value(&entry).map_err(|e| {
+                StorageError::Serialization {
+                    key: key.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            self.data.set(&key, serialized).await?;
+        }
+        Ok(())
+    }
 }
 
 fn to_value_for(key: &str, node: &Node) -> StorageResult<Value> {
@@ -141,6 +167,34 @@ impl NodeStoreTrait for NodeStore {
     }
 
     async fn set_node(&self, id: &str, node: Node) -> StorageResult<()> {
+        // Children referenced by the *new* node, used both to rewrite
+        // backward-reference rows and to detect which previous children
+        // (if any) have become stale.
+        let new_children: HashSet<String> = match &node {
+            Node::Primitive(_) => HashSet::new(),
+            Node::Composite(c) => c
+                .coefficients
+                .iter()
+                .map(|(coef_id, _)| coef_id.clone())
+                .collect(),
+        };
+
+        // If we're overwriting an existing composite, drop `id` from any of
+        // its previous children that are not also referenced by the new
+        // node — otherwise their `__outgoing__<child>` rows keep pointing
+        // at us and `get_parent_ids` returns phantom edges.
+        if let Some(prev_value) = self.data.get(id).await? {
+            if let Ok(Node::Composite(prev)) = serde_json::from_value::<Node>(prev_value) {
+                let stale: Vec<String> = prev
+                    .coefficients
+                    .iter()
+                    .map(|(coef_id, _)| coef_id.clone())
+                    .filter(|coef_id| !new_children.contains(coef_id))
+                    .collect();
+                self.remove_outgoing(&stale, id).await?;
+            }
+        }
+
         match node {
             Node::Primitive(p) => {
                 let value = to_value_for(id, &Node::Primitive(p))?;
@@ -202,26 +256,13 @@ impl NodeStoreTrait for NodeStore {
     async fn delete(&self, id: &str) -> StorageResult<()> {
         // Also remove __outgoing__ references to this node's children.
         if let Some(node_value) = self.data.get(id).await? {
-            if let Ok(node) = serde_json::from_value::<Node>(node_value) {
-                if let Node::Composite(c) = node {
-                    for (coef_id, _) in c.coefficients {
-                        let mut current_references = self
-                            .get_parent_ids(std::slice::from_ref(&coef_id))
-                            .await?
-                            .get(&coef_id)
-                            .cloned()
-                            .unwrap_or_else(Vec::new);
-                        current_references.retain(|ref_id| ref_id != id);
-                        let key = format!("__outgoing__{}", coef_id);
-                        let serialized = serde_json::to_value(&current_references).map_err(|e| {
-                            StorageError::Serialization {
-                                key: key.clone(),
-                                message: e.to_string(),
-                            }
-                        })?;
-                        self.data.set(&key, serialized).await?;
-                    }
-                }
+            if let Ok(Node::Composite(c)) = serde_json::from_value::<Node>(node_value) {
+                let child_ids: Vec<String> = c
+                    .coefficients
+                    .into_iter()
+                    .map(|(coef_id, _)| coef_id)
+                    .collect();
+                self.remove_outgoing(&child_ids, id).await?;
             }
             self.data.delete(id).await?;
         }
@@ -739,6 +780,102 @@ mod tests {
 
         let parent_ids = node_store.get_parent_ids(&["child".to_string()]).await.unwrap();
         assert_eq!(parent_ids.get("child").unwrap(), &vec!["parent"]);
+    }
+
+    #[tokio::test]
+    async fn test_set_node_clears_dropped_children_when_composite_shrinks() {
+        // Overwriting a composite with one whose coefficient set has shrunk
+        // must remove the parent from the dropped child's __outgoing__ row.
+        let store = Arc::new(InMemoryStore::new());
+        let node_store = NodeStore::new(store);
+
+        node_store.set_node("a", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("b", Node::Primitive((0, 1))).await.unwrap();
+
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1), ("b".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Sanity: both children point at parent.
+        let parents = node_store
+            .get_parent_ids(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(parents.get("a").unwrap(), &vec!["parent"]);
+        assert_eq!(parents.get("b").unwrap(), &vec!["parent"]);
+
+        // Rewrite parent to drop "b".
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let parents = node_store
+            .get_parent_ids(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(parents.get("a").unwrap(), &vec!["parent"]);
+        assert!(
+            parents.get("b").map(|v| v.is_empty()).unwrap_or(true),
+            "b's __outgoing__ row should not still list 'parent'; got {:?}",
+            parents.get("b"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_node_clears_all_children_when_composite_replaced_by_primitive() {
+        // Replacing a composite with a primitive must clear *all* of the
+        // previous composite's backward-reference rows.
+        let store = Arc::new(InMemoryStore::new());
+        let node_store = NodeStore::new(store);
+
+        node_store.set_node("a", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("b", Node::Primitive((0, 1))).await.unwrap();
+
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1), ("b".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Replace the composite with a primitive at the same id.
+        node_store
+            .set_node("parent", Node::Primitive((0, 1)))
+            .await
+            .unwrap();
+
+        let parents = node_store
+            .get_parent_ids(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            parents.get("a").map(|v| v.is_empty()).unwrap_or(true),
+            "a's __outgoing__ row should be empty after parent became primitive; got {:?}",
+            parents.get("a"),
+        );
+        assert!(
+            parents.get("b").map(|v| v.is_empty()).unwrap_or(true),
+            "b's __outgoing__ row should be empty after parent became primitive; got {:?}",
+            parents.get("b"),
+        );
     }
 
     #[tokio::test]
