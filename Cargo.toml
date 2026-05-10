@@ -6,7 +6,7 @@ description = "A DAG-based combinatorial-model framework."
 license     = "MIT"
 repository  = "https://github.com/ourstudio-se/pldag-rust"
 homepage    = "https://github.com/ourstudio-se/pldag-rust"
-keywords    = ["ilp", "milp", "combinatorics", "modelling", "constraints", "rules"]
+keywords    = ["ilp", "milp", "combinatorics", "modelling", "constraints"]
 categories  = ["science", "mathematics", "algorithms"]
 
 # ───────────────────────────────────────────────────────────
