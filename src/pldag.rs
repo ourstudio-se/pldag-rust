@@ -1,4 +1,4 @@
-use crate::error::{PldagError, Result};
+use crate::error::{ComputeError, ComputeResult, ModelError, ModelResult};
 use crate::storage::{InMemoryStore, NodeStore, NodeStoreTrait};
 use indexmap::IndexSet;
 use itertools::Itertools;
@@ -1000,7 +1000,7 @@ impl CompiledDag {
     pub fn propagate<K>(
         &self,
         assignments: impl IntoIterator<Item = (K, Bound)>,
-    ) -> Result<HashMap<String, Bound>>
+    ) -> ComputeResult<HashMap<String, Bound>>
     where
         K: ToString,
     {
@@ -1018,7 +1018,7 @@ impl CompiledDag {
         &self,
         assignments: impl IntoIterator<Item = (K, Bound)>,
         scratch: &mut Scratch,
-    ) -> Result<HashMap<String, Bound>>
+    ) -> ComputeResult<HashMap<String, Bound>>
     where
         K: ToString,
     {
@@ -1065,7 +1065,7 @@ impl CompiledDag {
                     let out = if assigned[i] {
                         let b = values[i];
                         if b.0 < inherent.0 || b.1 > inherent.1 {
-                            return Err(PldagError::NodeOutOfBounds {
+                            return Err(ComputeError::NodeOutOfBounds {
                                 node_id: self.ix_to_id[i].clone(),
                                 got_bound: b,
                                 expected_bound: inherent,
@@ -1212,7 +1212,7 @@ impl Pldag {
     pub fn tighten(
         dag: &CompiledDag,
         assumptions: &HashMap<String, Bound>,
-    ) -> Result<HashMap<String, Bound>> {
+    ) -> ComputeResult<HashMap<String, Bound>> {
         let n = dag.kind.len();
 
         // 1. Initialize bounds for all nodes
@@ -1240,7 +1240,7 @@ impl Pldag {
         loop {
             iter += 1;
             if iter > max_iters {
-                return Err(PldagError::MaxIterationsExceeded { max_iters });
+                return Err(ComputeError::MaxIterationsExceeded { max_iters });
             }
 
             let mut changed = false;
@@ -1313,7 +1313,7 @@ impl Pldag {
     pub fn reduce(
         dag: &CompiledDag,
         fixed: &HashMap<String, i32>,
-    ) -> Result<CompiledDag> {
+    ) -> ComputeResult<CompiledDag> {
         let mut nodes: Vec<(String, Node)> = Vec::new();
 
         'nodes: for (node_idx, kind) in dag.kind.iter().enumerate() {
@@ -1384,150 +1384,11 @@ impl Pldag {
     pub fn propagate_dag<K>(
         dag: &CompiledDag,
         assignments: impl IntoIterator<Item = (K, Bound)>,
-    ) -> Result<Assignment>
+    ) -> ComputeResult<Assignment>
     where
         K: ToString,
     {
         dag.propagate(assignments)
-    }
-
-    /// Propagates bounds through the DAG bottom-up.
-    ///
-    /// Starting from the given variable assignments, this method computes bounds
-    /// for all composite nodes by propagating constraints upward through the DAG.
-    ///
-    /// # Arguments
-    /// * `assignment` - Initial assignment of bounds to variables
-    /// * `to_root` - Optional root node to end propagation at
-    ///
-    /// # Returns
-    /// Complete assignment including bounds for all reachable nodes
-    pub async fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>) -> Result<Assignment>
-    where
-        K: ToString,
-    {
-        // Convert assignments into HashMap<String, Bound>
-        let assignments_map: HashMap<String, Bound> = assignments
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-
-        // Initialize results with the provided assignments
-        let mut results: HashMap<String, Bound> = HashMap::new();
-
-        // Extract all keys from the initial assignments
-        let mut queue: Vec<String> = assignments_map.keys().cloned().collect();
-
-        // Keep track of visited nodes to avoid reprocessing1
-        let mut visited = HashSet::new();
-        while !queue.is_empty() {
-            let mut next_batch: Vec<String> = Vec::new();
-            let mut processed_this_batch: Vec<String> = Vec::new();
-            let batch_incoming = self.storage.get_nodes(&queue).await?;
-
-            // Loop over all nodes in queue
-            while let Some(node_id) = queue.pop() {
-                if visited.contains(&node_id) {
-                    continue; // Already processed this node
-                }
-
-                let node = match batch_incoming.get(&node_id) {
-                    Some(n) => n,
-                    None => {
-                        // We just don't care if user applied a node that's not in the dag
-                        continue
-                    }
-                };
-
-                match node {
-                    Node::Primitive(primitive) => {
-                        // If this node is in the initial assignments, use that value
-                        if let Some(bound) = assignments_map.get(&node_id) {
-
-                            // However, if the assigned bound is looser than the primitive's inherent bound,
-                            // we return an error since it is not allowed.
-                            if bound.0 < primitive.0 || bound.1 > primitive.1 {
-                                return Err(PldagError::NodeOutOfBounds {
-                                    node_id: node_id.clone(),
-                                    got_bound: *bound,
-                                    expected_bound: *primitive,
-                                });
-                            }
-
-                            results.insert(node_id.to_string(), *bound);
-                        } else {
-                            // Otherwise, use the primitive's inherent bound
-                            results.insert(node_id.to_string(), *primitive);
-                        }
-                        visited.insert(node_id.clone());
-                        processed_this_batch.push(node_id.clone());
-                    }
-                    Node::Composite(constraint) => {
-                        // Filter coefficients and calculate bias
-                        let bias: i32 = constraint.bias.0; // Using lower bound for bias
-                        let coefficients = &constraint.coefficients;
-
-                        // Check if all input variables are in results
-                        let all_inputs_available = coefficients
-                            .iter()
-                            .all(|(input_id, _)| results.contains_key(input_id));
-
-                        if !all_inputs_available {
-                            // Put the missing coefficients back to the queue
-                            for (input_id, _) in coefficients.iter() {
-                                if !results.contains_key(input_id) && !next_batch.contains(input_id)
-                                {
-                                    next_batch.push(input_id.clone());
-                                }
-                            }
-                            // Not all inputs are ready, push this node back to the queue
-                            next_batch.push(node_id.clone());
-                            continue;
-                        }
-
-                        // Get coefficient values from results
-                        let mut coef_vals = HashMap::new();
-                        for (input_id, _) in coefficients.iter() {
-                            if let Some(val) = results.get(input_id) {
-                                coef_vals.insert(input_id.clone(), *val);
-                            }
-                        }
-
-                        // Calculate result
-                        // Instead of allocating a Vec, accumulate directly.
-                        let summed = coefficients.iter().fold((0, 0), |acc, (input_id, coef)| {
-                            let bound = coef_vals.get(input_id).unwrap();
-                            let prod = bound_multiply(*coef, *bound);
-                            bound_add(acc, prod)
-                        });
-                        let biased = bound_add(summed, (bias, bias));
-
-                        results.insert(
-                            node_id.to_string(),
-                            ((biased.0 >= 0) as i32, (biased.1 >= 0) as i32),
-                        );
-                        visited.insert(node_id.clone());
-                        processed_this_batch.push(node_id.clone());
-                    }
-                }
-            }
-
-            // Add dependent nodes to next batch
-            let batch_outgoing = self.storage.get_parent_ids(&processed_this_batch).await?;
-            for outgoing in batch_outgoing.values() {
-                for dependent in outgoing.iter() {
-                    if !visited.contains(dependent) && !next_batch.contains(dependent) {
-                        next_batch.push(dependent.clone());
-                    }
-                }
-            }
-
-            if !next_batch.is_empty() {
-                queue = next_batch;
-            }
-        }
-
-        Ok(results)
     }
 
     /// Computes ranks for all nodes in the DAG.
@@ -1538,7 +1399,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A HashMap of node IDs to their corresponding ranks
-    pub fn ranks(cd: &CompiledDag) -> Result<HashMap<ID, usize>> {
+    pub fn ranks(cd: &CompiledDag) -> ComputeResult<HashMap<ID, usize>> {
         let n = cd.kind.len();
         let mut ranks: Vec<usize> = vec![0; n];
         let mut in_degree: Vec<usize> = vec![0; n];
@@ -1587,7 +1448,7 @@ impl Pldag {
         if processed != n {
             // Find a node that wasn't processed (part of the cycle)
             let cycle_node_idx = in_degree.iter().position(|&deg| deg > 0).unwrap_or(0);
-            return Err(PldagError::CycleDetected {
+            return Err(ComputeError::CycleDetected {
                 node_id: cd.ix_to_id[cycle_node_idx].clone(),
             });
         }
@@ -1610,7 +1471,7 @@ impl Pldag {
     pub fn topological_sort(
         dag: &HashMap<ID, Node>,
         dependency_map: &HashMap<ID, Vec<ID>>,
-    ) -> Result<Vec<ID>> {
+    ) -> ComputeResult<Vec<ID>> {
         let mut in_degree: HashMap<String, usize> =
             dag.keys().map(|node_id| (node_id.clone(), 0)).collect();
 
@@ -1682,7 +1543,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A HashMap of node IDs to their corresponding nodes in the sub-DAG
-    pub async fn sub_dag(&self, roots: Vec<ID>) -> Result<CompiledDag> {
+    pub async fn sub_dag(&self, roots: Vec<ID>) -> ModelResult<CompiledDag> {
         // If no roots, return entire DAG
         if roots.is_empty() {
             return self.dag().await;
@@ -1703,7 +1564,7 @@ impl Pldag {
             // Check that we got all nodes from queue
             for node_id in queue.iter() {
                 if !all_incoming.contains_key(node_id) {
-                    return Err(PldagError::NodeNotFound { node_id: node_id.to_string() });
+                    return Err(ModelError::NodeNotFound { node_id: node_id.to_string() });
                 }
             }
 
@@ -1740,7 +1601,7 @@ impl Pldag {
     /// model with `set_*` methods, call `dag()` once, then propagate or
     /// solve against the resulting compact representation as many times as
     /// you like. See [`Pldag::sub_dag`] to compile only a subset.
-    pub async fn dag(&self) -> Result<CompiledDag> {
+    pub async fn dag(&self) -> ModelResult<CompiledDag> {
         let all_nodes = self.storage.get_all_nodes().await?.into_iter().collect::<Vec<_>>();
         Ok(CompiledDag::compile(all_nodes))
     }
@@ -1759,7 +1620,7 @@ impl Pldag {
     pub fn to_sparse_polyhedron(
         cd: &CompiledDag,
         double_binding: bool,
-    ) -> Result<SparsePolyhedron> {
+    ) -> ComputeResult<SparsePolyhedron> {
         let ncols = cd.kind.len();
 
         // Pre-count composites + NNZ to reserve capacity
@@ -1885,7 +1746,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `SparsePolyhedron` with full constraint encoding
-    pub fn to_sparse_polyhedron_default(cd: &CompiledDag) -> Result<SparsePolyhedron> {
+    pub fn to_sparse_polyhedron_default(cd: &CompiledDag) -> ComputeResult<SparsePolyhedron> {
         Self::to_sparse_polyhedron(cd, true)
     }
 
@@ -1896,7 +1757,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` representing the DAG constraints
-    pub fn to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> Result<DensePolyhedron> {
+    pub fn to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> ComputeResult<DensePolyhedron> {
         // Convert to sparse polyhedron first
         let sparse_polyhedron = Self::to_sparse_polyhedron(cd, double_binding)?;
         // Convert sparse to dense polyhedron
@@ -1907,7 +1768,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` with all constraint options enabled
-    pub fn to_dense_polyhedron_default(cd: &CompiledDag) -> Result<DensePolyhedron> {
+    pub fn to_dense_polyhedron_default(cd: &CompiledDag) -> ComputeResult<DensePolyhedron> {
         Self::to_dense_polyhedron(cd, true)
     }
 
@@ -1955,7 +1816,7 @@ impl Pldag {
     /// * `id` - The unique identifier of the node to retrieve
     /// # Returns
     /// An `Option<Node>` which is Some(Node) if found, or None if not found
-    pub async fn get_node(&self, id: &str) -> Result<Option<Node>> {
+    pub async fn get_node(&self, id: &str) -> ModelResult<Option<Node>> {
         Ok(self.storage.get_nodes(&[id.to_string()]).await?.get(id).cloned())
     }
 
@@ -1966,7 +1827,7 @@ impl Pldag {
     /// * `ids` - A slice of unique identifiers for the nodes to retrieve
     /// # Returns
     /// A `HashMap<String, Node>` mapping each requested ID to its corresponding Node.
-    pub async fn get_nodes(&self, ids: &[String]) -> Result<HashMap<String, Node>> {
+    pub async fn get_nodes(&self, ids: &[String]) -> ModelResult<HashMap<String, Node>> {
         Ok(self.storage.get_nodes(ids).await?)
     }
 
@@ -1974,11 +1835,11 @@ impl Pldag {
     ///
     /// # Arguments
     /// * `id` - The unique identifier of the node to delete
-    pub async fn delete_node(&self, id: &str) -> Result<()> {
+    pub async fn delete_node(&self, id: &str) -> ModelResult<()> {
         let parents = self.storage.get_parent_ids(&[id.to_string()]).await?;
         if let Some(parents) = parents.get(id) {
             if !parents.is_empty() {
-                return Err(PldagError::NodeReferenced {
+                return Err(ModelError::NodeReferenced {
                     node_id: id.to_string(),
                     referencing_nodes: parents.clone(),
                 });
@@ -1996,7 +1857,7 @@ impl Pldag {
     /// # Arguments
     /// * `id` - Unique identifier for the variable
     /// * `bound` - The allowed range (min, max) for this variable
-    pub async fn set_primitive(&self, id: &str, bound: Bound) -> Result<ID> {
+    pub async fn set_primitive(&self, id: &str, bound: Bound) -> ModelResult<ID> {
         self.storage.set_node(id, Node::Primitive(bound)).await?;
         Ok(id.to_string())
     }
@@ -2009,7 +1870,7 @@ impl Pldag {
     /// # Arguments
     /// * `ids` - Iterator of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
-    pub async fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
+    pub async fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> ModelResult<Vec<ID>>
     where
         K: ToString,
     {
@@ -2039,7 +1900,7 @@ impl Pldag {
         &self,
         coefficient_variables: impl IntoIterator<Item = (K, i32)>,
         bias: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
     {   
@@ -2051,14 +1912,14 @@ impl Pldag {
 
         // Require at least one coefficient to prevent empty constraints
         if unique_coefficients.len() == 0 {
-            return Err(PldagError::EmptyConstraint);
+            return Err(ModelError::EmptyConstraint);
         }
 
         // Check that all coefficient IDs exist in storage
         if self.validate_coeffs {
             for coef_id in unique_coefficients.keys() {
                 if !self.storage.node_exists(coef_id).await? {
-                    return Err(PldagError::NodeNotFound {
+                    return Err(ModelError::NodeNotFound {
                         node_id: coef_id.clone(),
                     });
                 }
@@ -2098,7 +1959,7 @@ impl Pldag {
         &self,
         references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2115,7 +1976,7 @@ impl Pldag {
         &self,
         references: impl IntoIterator<Item = K>,
         value: V,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         V: ToString,
@@ -2141,7 +2002,7 @@ impl Pldag {
         &self,
         references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2156,7 +2017,7 @@ impl Pldag {
         &self,
         references: impl IntoIterator<Item = K>,
         value: V,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         V: ToString,
@@ -2184,7 +2045,7 @@ impl Pldag {
         &self,
         references: I,
         value: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         I: IntoIterator<Item = K> + Clone,
@@ -2202,7 +2063,7 @@ impl Pldag {
         &self,
         references: I,
         value: V,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         V: ToString,
@@ -2223,7 +2084,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2243,7 +2104,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2262,7 +2123,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_optional<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_optional<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2282,7 +2143,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2305,7 +2166,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2324,7 +2185,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2343,7 +2204,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2364,7 +2225,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2386,7 +2247,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> Result<ID>
+    pub async fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> ModelResult<ID>
     where
         C: ToString,
         Q: ToString,
@@ -2406,7 +2267,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> Result<ID>
+    pub async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> ModelResult<ID>
     where
         L: ToString,
         R: ToString,
@@ -2463,7 +2324,7 @@ mod tests {
                 .collect::<HashMap<&str, Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.propagate(interp).await.unwrap();
+            let prop = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -2535,7 +2396,7 @@ mod tests {
         let mut assignments = HashMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        let result = model.propagate(assignments).await.unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         let model = Pldag::new();
@@ -2554,21 +2415,21 @@ mod tests {
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments).await.unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = HashMap::new();
         assignments.insert("x", (0, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments).await.unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = HashMap::new();
         assignments.insert("x", (0, 0));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (0, 0));
-        let result = model.propagate(assignments).await.unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         // Test propagation to specific root only and check that the others are not included in the result
@@ -2669,20 +2530,20 @@ mod tests {
         // a=1 ⇒ output must be 1
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("a", (1, 1));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("a", (0, 0));
         interp.insert("b", (0, 0));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("b", (0, 0));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&or_root], (0, 1));
     }
 
@@ -2702,13 +2563,13 @@ mod tests {
         // p = 0 ⇒ root = 1
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("p", (0, 0));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("p", (1, 1));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&not_root], (0, 0));
     }
 
@@ -2795,7 +2656,7 @@ mod tests {
         interp.insert("x", (1, 1));
         interp.insert("y", (1, 1));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&w], (1, 1));
         assert_eq!(res[&v], (1, 1));
 
@@ -2804,7 +2665,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (1, 1));
         interp.insert("z", (1, 1));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (1, 1));
 
@@ -2813,7 +2674,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (0, 0));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp).await.unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (0, 0));
     }
@@ -2829,7 +2690,7 @@ mod tests {
         let mut interp = HashMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         interp.insert("u", (5, 5));
-        let res = model.propagate(interp).await;
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
 
         // Assert that we did get an error
         assert!(res.is_err());
@@ -2843,7 +2704,7 @@ mod tests {
                     .iter()
                     .map(|(k, &v)| (k.as_str(), (v, v)))
                     .collect::<HashMap<&str, Bound>>();
-                let model_prop = model.propagate(assignments).await.unwrap();
+                let model_prop = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -3034,28 +2895,28 @@ mod tests {
         let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("p", (2, 2)); // Out of bounds
-        let result = model.propagate(interp).await;
-        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(matches!(result, Err(ComputeError::NodeOutOfBounds { .. })));
         
         let model = Pldag::new();
         let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("p", (-1, 2)); // Out of bounds
-        let result = model.propagate(interp).await;
-        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(matches!(result, Err(ComputeError::NodeOutOfBounds { .. })));
         
         let model = Pldag::new();
         let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("p", (-1, -1)); // Out of bounds
-        let result = model.propagate(interp).await;
-        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(matches!(result, Err(ComputeError::NodeOutOfBounds { .. })));
         
         let model = Pldag::new();
         let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
         interp.insert("p", (1, 1)); // Not out of bounds
-        let result = model.propagate(interp).await;
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
         assert!(result.is_ok());
     }
 
@@ -3068,7 +2929,7 @@ mod tests {
         let _ = model.set_primitive("q", (0, 1)).await;
         // set_and will return an error when 'r' does not exist
         let result = model.set_and(vec!["p", "q", "r"]).await;
-        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+        assert!(matches!(result, Err(ModelError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
     #[tokio::test]
@@ -3080,7 +2941,7 @@ mod tests {
         let _ = model.set_primitive("q", (0, 1)).await;
         // set_and will return an error when 'r' does not exist
         let result = model.set_and(vec!["p", "q", "r"]).await;
-        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+        assert!(matches!(result, Err(ModelError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
     #[tokio::test]
@@ -3092,7 +2953,7 @@ mod tests {
         let _ = model.set_primitive("q", (0, 1)).await;
         // set_and will return an error when 'r' does not exist
         let result = model.set_and(vec!["p", "q", "r"]).await;
-        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+        assert!(matches!(result, Err(ModelError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
     #[tokio::test]
@@ -3101,7 +2962,7 @@ mod tests {
         // since an empty linear inequality is not a meaningful constraint.
         let model = Pldag::new();
         let result = model.set_gelineq(Vec::<(&str, i32)>::new(), 0).await;
-        assert!(matches!(result, Err(PldagError::EmptyConstraint)));
+        assert!(matches!(result, Err(ModelError::EmptyConstraint)));
     }
 
     #[tokio::test]
@@ -3405,7 +3266,7 @@ mod tests {
         let propagated = Pldag::propagate_dag(&dag, assignments.clone()).unwrap();
         assert_eq!(propagated.get(&root).unwrap(), &(1, 1));
 
-        let propagated = model.propagate(assignments).await.unwrap();
+        let propagated = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(propagated.get(&root).unwrap(), &(1, 1));
     }
 

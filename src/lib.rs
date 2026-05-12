@@ -28,7 +28,7 @@
 //! ```no_run
 //! use pldag::{Pldag, Scratch};
 //!
-//! # async fn run() -> pldag::Result<()> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let model = Pldag::new();
 //! model.set_primitive("a", (0, 1)).await?;
 //! model.set_primitive("b", (0, 1)).await?;
@@ -49,12 +49,17 @@
 //!
 //! ## Errors
 //!
-//! All fallible operations return [`Result<T, PldagError>`]. Storage backends
-//! return [`StorageResult<T, StorageError>`], which is automatically converted
-//! into [`PldagError::Storage`] when bubbled up.
+//! Fallible operations return one of two precise result types:
 //!
-//! [`Result<T, PldagError>`]: Result
-//! [`StorageResult<T, StorageError>`]: StorageResult
+//! - [`ComputeResult<T>`] — pure in-memory operations on a [`CompiledDag`]
+//!   (propagation, tightening, ranks, polyhedron conversion). Errors are
+//!   modelled by [`ComputeError`].
+//! - [`ModelResult<T>`] — operations that read or mutate the model's storage
+//!   (`set_*`, `delete_node`, `dag`, `sub_dag`, `get_node`). Errors are
+//!   modelled by [`ModelError`], which wraps backend-level [`StorageError`]s.
+//!
+//! The two enums are disjoint: no variant is shared, so each function signature
+//! precisely describes its failure modes.
 
 #![warn(missing_docs)]
 
@@ -62,6 +67,6 @@ mod error;
 mod pldag;
 mod storage;
 
-pub use error::{PldagError, Result, StorageError, StorageResult};
+pub use error::{ComputeError, ComputeResult, StorageError, StorageResult, ModelError, ModelResult};
 pub use pldag::{ID, Bound, Pldag, Node, Constraint, SparsePolyhedron, DensePolyhedron, CompiledDag, Kind, Coef, Scratch};
 pub use storage::{InMemoryStore, KeyValueStore, NodeStore, NodeStoreTrait};

@@ -44,8 +44,5 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run tests (without GLPK feature)
-        run: cargo test --no-default-features
-
-      - name: Run tests (with GLPK feature)
-        run: cargo test --features glpk
+      - name: Run tests
+        run: cargo test

@@ -10,7 +10,7 @@ The central operation is `sub_dag`: given one or more nodes of interest, it extr
 
 PL-DAGs are especially useful when a domain contains many overlapping logical models:
 
-- product configurations split by year, model, trim, market, or baseline
+- many variants of the same model that differ along independent dimensions (region, segment, version, time period, …)
 - commercial and technical/BOM layers that need to coexist
 - feature toggles and dependency systems shared across many products
 - capacity, compatibility, and selection rules reused in many contexts
@@ -99,8 +99,8 @@ Because the traits are async, you can back the DAG with any database that has an
 ### Building the model
 
 ```rust
-async fn set_primitive(&self, id: &str, bound: Bound) -> Result<ID>;
-async fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
+async fn set_primitive(&self, id: &str, bound: Bound) -> ModelResult<ID>;
+async fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> ModelResult<Vec<ID>>
 where K: ToString;
 ```
 
@@ -111,16 +111,16 @@ async fn set_gelineq<K>(
     &self,
     coefficient_variables: impl IntoIterator<Item = (K, i32)>,
     bias: i32,
-) -> Result<ID>
+) -> ModelResult<ID>
 where K: ToString;
 ```
 
 Creates a general linear inequality: `sum(coeff_i * var_i) + bias >= 0`.
 
 ```rust
-async fn set_atleast<K>(&self, references: impl IntoIterator<Item = K>, value: i32) -> Result<ID>;
-async fn set_atmost<K>(&self, references: impl IntoIterator<Item = K>, value: i32) -> Result<ID>;
-async fn set_equal<K, I>(&self, references: I, value: i32) -> Result<ID>;
+async fn set_atleast<K>(&self, references: impl IntoIterator<Item = K>, value: i32) -> ModelResult<ID>;
+async fn set_atmost<K>(&self, references: impl IntoIterator<Item = K>, value: i32) -> ModelResult<ID>;
+async fn set_equal<K, I>(&self, references: I, value: i32) -> ModelResult<ID>;
 ```
 
 `sum(vars) >= value`, `sum(vars) <= value`, `sum(vars) == value`.
@@ -128,15 +128,15 @@ async fn set_equal<K, I>(&self, references: I, value: i32) -> Result<ID>;
 #### Logical constraints
 
 ```rust
-async fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> Result<ID>;
-async fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> Result<ID>;
-async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> Result<ID>;
+async fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>;
+async fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> ModelResult<ID>;
+async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> ModelResult<ID>;
 ```
 
 - `set_and`: True iff all input variables are true.
@@ -152,46 +152,57 @@ async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> Result<ID>;
 #### Inspection / removal
 
 ```rust
-async fn get_node(&self, id: &str) -> Result<Option<Node>>;
-async fn get_nodes(&self, ids: &[String]) -> Result<HashMap<String, Node>>;
-async fn delete_node(&self, id: &str) -> Result<()>;
+async fn get_node(&self, id: &str) -> ModelResult<Option<Node>>;
+async fn get_nodes(&self, ids: &[String]) -> ModelResult<HashMap<String, Node>>;
+async fn delete_node(&self, id: &str) -> ModelResult<()>;
 ```
 
-`delete_node` errors with `PldagError::NodeReferenced` if other nodes still depend on the target.
+`delete_node` errors with `ModelError::NodeReferenced` if other nodes still depend on the target.
 
 ### Snapshotting & analysis
 
 ```rust
-async fn dag(&self) -> Result<CompiledDag>;
-async fn sub_dag(&self, roots: Vec<ID>) -> Result<CompiledDag>;
+async fn dag(&self) -> ModelResult<CompiledDag>;
+async fn sub_dag(&self, roots: Vec<ID>) -> ModelResult<CompiledDag>;
 ```
 
 `dag` snapshots the entire DAG; `sub_dag` snapshots only the subgraph reachable from `roots` (or the entire DAG if `roots` is empty).
 
-Once you hold a `CompiledDag`, all further analyses are synchronous:
+Once you hold a `CompiledDag`, all further analyses are synchronous and return [`ComputeResult`]:
 
 ```rust
 fn CompiledDag::propagate<K>(
     &self,
     assignments: impl IntoIterator<Item = (K, Bound)>,
-) -> Result<HashMap<String, Bound>>;
+) -> ComputeResult<HashMap<String, Bound>>;
 
 fn Pldag::propagate_dag<K>(
     dag: &CompiledDag,
     assignments: impl IntoIterator<Item = (K, Bound)>,
-) -> Result<Assignment>;
+) -> ComputeResult<Assignment>;
 ```
 
-`Pldag::propagate(&self, ...)` is an async convenience wrapper that snapshots and computes in one call.
+Snapshot then compute: `let dag = pldag.dag().await?; let bounds = dag.propagate(assignments)?;`.
 
 ### Export
 
 ```rust
-fn Pldag::to_sparse_polyhedron(cd: &CompiledDag, double_binding: bool) -> Result<SparsePolyhedron>;
-fn Pldag::to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> Result<DensePolyhedron>;
+fn Pldag::to_sparse_polyhedron(cd: &CompiledDag, double_binding: bool) -> ComputeResult<SparsePolyhedron>;
+fn Pldag::to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> ComputeResult<DensePolyhedron>;
 ```
 
 Both `SparsePolyhedron` and `DensePolyhedron` implement `serde::Serialize`, so you can ship them over HTTP to a remote ILP service or hand them to any in-process solver of your choice.
+
+---
+
+## Errors
+
+Fallible operations return one of two disjoint result types so each function's signature describes its actual failure modes:
+
+- **`ModelResult<T>` / `ModelError`** — operations that touch storage (`set_*`, `delete_node`, `get_node(s)`, `dag`, `sub_dag`). Variants: `EmptyConstraint`, `NodeNotFound`, `NodeReferenced`, and `Backend(StorageError)` for underlying backend failures.
+- **`ComputeResult<T>` / `ComputeError`** — pure in-memory operations on a `CompiledDag` (propagate, tighten, ranks, polyhedron export). Variants: `NodeOutOfBounds`, `MaxIterationsExceeded`, `CycleDetected`.
+
+`StorageError` is the lower-level backend error returned by `KeyValueStore` / `NodeStoreTrait` implementations; it flows into `ModelError::Backend` via `?`.
 
 ---
 
@@ -265,7 +276,7 @@ async fn main() {
 
 - All `set_*` functions accept any iterable type whose items implement `ToString`.
 - `Pldag::new()` returns a model backed by an in-memory store. Use `Pldag::new_custom(store)` to provide your own backend.
-- Storage failures surface as `PldagError::Storage(StorageError)`.
+- Storage backend failures surface as `ModelError::Backend(StorageError)` and bubble up from `?` automatically via the `From<StorageError> for ModelError` impl.
 
 ## License
 

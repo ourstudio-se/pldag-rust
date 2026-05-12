@@ -32,3 +32,4 @@ trace   = ["tracing"]
 
 [dev-dependencies]
 tokio = { version = "1.52.2", features = ["rt", "macros", "rt-multi-thread"] }
+glpk-rust = "0.1.15"

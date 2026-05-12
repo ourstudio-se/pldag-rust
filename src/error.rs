@@ -1,10 +1,13 @@
 use std::fmt;
 
-/// Result type alias for pldag operations
-pub type Result<T> = std::result::Result<T, PldagError>;
-
 /// Result alias used by storage backends.
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
+
+/// Result alias for pure-compute operations on a [`crate::CompiledDag`].
+pub type ComputeResult<T> = std::result::Result<T, ComputeError>;
+
+/// Result alias for operations that touch the model's storage.
+pub type ModelResult<T> = std::result::Result<T, ModelError>;
 
 /// Errors raised by storage backend implementations.
 ///
@@ -63,25 +66,12 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-/// Error types that can occur during pldag operations
+/// Errors raised by pure-compute operations on a [`crate::CompiledDag`].
+///
+/// These never involve storage. Functions returning [`ComputeResult`] operate
+/// entirely in-memory on an already-fetched DAG.
 #[derive(Debug, Clone, PartialEq)]
-pub enum PldagError {
-
-    /// A constraint was created with no coefficient variables, which is invalid
-    EmptyConstraint,
-
-    /// A cycle was detected in the DAG, which violates the acyclic property
-    CycleDetected {
-        /// The id of a node that participates in the cycle.
-        node_id: String,
-    },
-
-    /// A referenced node was not found in the storage
-    NodeNotFound {
-        /// The id that was looked up but not present.
-        node_id: String,
-    },
-
+pub enum ComputeError {
     /// A propagation assignment violated a primitive's declared inherent bound.
     NodeOutOfBounds {
         /// The id of the offending primitive node.
@@ -98,6 +88,52 @@ pub enum PldagError {
         max_iters: usize,
     },
 
+    /// A cycle was detected in the DAG, which violates the acyclic property.
+    CycleDetected {
+        /// The id of a node that participates in the cycle.
+        node_id: String,
+    },
+}
+
+impl fmt::Display for ComputeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ComputeError::NodeOutOfBounds {
+                node_id,
+                got_bound,
+                expected_bound,
+            } => write!(
+                f,
+                "Node '{}' out of bounds: got {:?}, expected {:?}",
+                node_id, got_bound, expected_bound
+            ),
+            ComputeError::MaxIterationsExceeded { max_iters } => {
+                write!(f, "Max iterations exceeded during tightening: {}", max_iters)
+            }
+            ComputeError::CycleDetected { node_id } => {
+                write!(f, "Cycle detected in DAG at node '{}'", node_id)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ComputeError {}
+
+/// Errors raised by operations that touch the model's storage.
+///
+/// Covers both model-level validation (e.g. referencing an unknown node when
+/// building a constraint) and underlying backend failures.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelError {
+    /// A constraint was created with no coefficient variables, which is invalid.
+    EmptyConstraint,
+
+    /// A referenced node was not found in the storage.
+    NodeNotFound {
+        /// The id that was looked up but not present.
+        node_id: String,
+    },
+
     /// A delete was attempted on a node that other nodes still reference.
     NodeReferenced {
         /// The id of the node whose deletion was rejected.
@@ -107,52 +143,36 @@ pub enum PldagError {
     },
 
     /// An error originating from the storage backend.
-    Storage(StorageError),
+    Backend(StorageError),
 }
 
-impl From<StorageError> for PldagError {
+impl From<StorageError> for ModelError {
     fn from(err: StorageError) -> Self {
-        PldagError::Storage(err)
+        ModelError::Backend(err)
     }
 }
 
-impl fmt::Display for PldagError {
+impl fmt::Display for ModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PldagError::EmptyConstraint => write!(f, "Constraint cannot be empty; at least one coefficient is required"),
-            PldagError::CycleDetected { node_id } => {
-                write!(f, "Cycle detected in DAG at node '{}'", node_id)
-            }
-            PldagError::NodeNotFound { node_id } => {
+            ModelError::EmptyConstraint => write!(
+                f,
+                "Constraint cannot be empty; at least one coefficient is required"
+            ),
+            ModelError::NodeNotFound { node_id } => {
                 write!(f, "Node '{}' not found in storage", node_id)
             }
-            PldagError::NodeOutOfBounds {
-                node_id,
-                got_bound,
-                expected_bound,
-            } => {
-                write!(
-                    f,
-                    "Node '{}' out of bounds: got {:?}, expected {:?}",
-                    node_id, got_bound, expected_bound
-                )
-            }
-            PldagError::MaxIterationsExceeded { max_iters } => {
-                write!(f, "Max iterations exceeded during tightening: {}", max_iters)
-            }
-            PldagError::NodeReferenced {
+            ModelError::NodeReferenced {
                 node_id,
                 referencing_nodes,
-            } => {
-                write!(
-                    f,
-                    "Cannot delete node '{}'; it is referenced by nodes: {:?}",
-                    node_id, referencing_nodes
-                )
-            }
-            PldagError::Storage(err) => write!(f, "{}", err),
+            } => write!(
+                f,
+                "Cannot delete node '{}'; it is referenced by nodes: {:?}",
+                node_id, referencing_nodes
+            ),
+            ModelError::Backend(err) => write!(f, "{}", err),
         }
     }
 }
 
-impl std::error::Error for PldagError {}
+impl std::error::Error for ModelError {}
