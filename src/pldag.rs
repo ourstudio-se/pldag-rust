@@ -1,4 +1,4 @@
-use crate::error::{PldagError, Result};
+use crate::error::{ComputeError, ComputeResult, ModelError, ModelResult};
 use crate::storage::{InMemoryStore, NodeStore, NodeStoreTrait};
 use indexmap::IndexSet;
 use itertools::Itertools;
@@ -115,6 +115,7 @@ fn intersect_bounds(a: Bound, b: Bound) -> Bound {
 /// where bias_min = bias.0.
 ///
 /// Returns true if any bound was changed.
+#[allow(dead_code)]
 fn tighten_constraint_true(constraint: &Constraint, values: &mut HashMap<String, Bound>) -> bool {
     let mut changed = false;
 
@@ -188,7 +189,7 @@ fn evaluate_constraint(coefs: &[Coef], bias_lo: i32, values: &[Bound], _dag: &Co
 }
 
 /// Tighten variable bounds for CompiledDag assuming constraint is TRUE.
-fn tighten_constraint_true_compiled(coefs: &[Coef], bias_lo: i32, values: &mut Vec<Bound>) -> bool {
+fn tighten_constraint_true_compiled(coefs: &[Coef], bias_lo: i32, values: &mut [Bound]) -> bool {
     let mut changed = false;
     let b = -bias_lo;
 
@@ -543,6 +544,12 @@ impl From<DenseIntegerMatrix> for SparseIntegerMatrix {
     }
 }
 
+impl Default for SparseIntegerMatrix {
+    fn default() -> Self {
+        SparseIntegerMatrix::new()
+    }
+}
+
 impl SparseIntegerMatrix {
     /// Creates a new empty sparse integer matrix.
     ///
@@ -664,10 +671,10 @@ impl Constraint {
     /// - .1 is 1 if the constraint is satisfied with upper bounds, 0 otherwise
     pub fn evaluate(&self, values: &HashMap<String, Bound>) -> Bound {
         let bound = self.dot(values);
-        return (
+        (
             (bound.0 + self.bias.0 >= 0) as i32,
             (bound.1 + self.bias.1 >= 0) as i32,
-        );
+        )
     }
 
     /// Creates the negation of this constraint.
@@ -698,38 +705,112 @@ pub enum Node {
     Primitive(Bound),
 }
 
+/// The kind of a node in a [`CompiledDag`].
+///
+/// Each node is either a leaf (a primitive variable with declared bounds) or
+/// a composite (a linear-combination constraint over other nodes).
 #[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub enum Kind {
-    Primitive { inherent: Bound },
-    Composite { bias_lo: i32, coef_range: (usize, usize) }, // range into flat coef vec
+    /// A leaf variable with a declared inherent bound `(lower, upper)`.
+    Primitive {
+        /// The intrinsic bound the variable is allowed to take.
+        inherent: Bound,
+    },
+    /// A composite (linear-combination) constraint.
+    ///
+    /// Evaluates as `sum(coef_i * value_i) + bias_lo >= 0`, where the
+    /// `(coef_i, value_i)` pairs are the slice `coefs[start..end]` of the
+    /// owning [`CompiledDag`].
+    Composite {
+        /// Constant additive term applied before the `>= 0` test.
+        bias_lo: i32,
+        /// Half-open `[start, end)` range into the parent DAG's flat
+        /// [`coefs`](CompiledDag::coefs) vector.
+        coef_range: (usize, usize),
+    },
 }
 
+/// A single `(input_index, coefficient)` term inside a composite constraint.
+///
+/// Composite nodes in a [`CompiledDag`] reference these via a half-open
+/// [`Kind::Composite::coef_range`] into the flat [`CompiledDag::coefs`] array.
 #[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub struct Coef {
+    /// Dense index of the input node in the parent [`CompiledDag`].
     pub input: u32,
+    /// The coefficient applied to that input.
     pub coef: i32,
 }
 
+/// A compact, indexed snapshot of a [`Pldag`], optimised for fast propagation.
+///
+/// Build one with [`Pldag::dag`] (or directly with [`CompiledDag::compile`])
+/// and then call [`CompiledDag::propagate`] (or
+/// [`CompiledDag::propagate_with_scratch`] in hot loops).
+///
+/// The fields are public to support advanced consumers (custom traversals,
+/// custom polyhedron encodings) but should be treated as a read-only,
+/// internally-consistent representation. Mutating them out-of-band may
+/// produce undefined behaviour at the API level.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CompiledDag {
-    // Map external string id -> dense int id
+    /// Map from external string id to the dense `u32` index used internally.
     pub id_to_ix: HashMap<String, u32>,
-    pub ix_to_id: Vec<String>, // only needed if you want string outputs / debugging
+    /// Reverse of [`id_to_ix`](Self::id_to_ix); used to render outputs back as strings.
+    pub ix_to_id: Vec<String>,
 
+    /// The [`Kind`] of each node, indexed by dense id.
     pub kind: Vec<Kind>,
+    /// Flat backing storage for all composite-node coefficient terms.
+    /// Each composite slices into this via its [`Kind::Composite::coef_range`].
     pub coefs: Vec<Coef>,
 
-    // reverse deps: for each node, which composites depend on it?
+    /// Reverse-dependency lists: for each node, the dense ids of composites
+    /// that consume it as an input. Used by propagation to wake parents.
     pub parents: Vec<Vec<u32>>,
 
-    // for each composite node: number of inputs it requires
+    /// For each composite node, the number of inputs it has. Indexed by dense
+    /// id; entries for primitive nodes are `0`.
     pub input_count: Vec<u32>,
+}
 
-    // scratch buffers reused between propagations (big win)
+/// Reusable scratch buffers for [`CompiledDag::propagate_with_scratch`].
+///
+/// Allocate once with [`Scratch::new`] and reuse across many calls — including
+/// across DAGs of different sizes — to amortise the per-call allocation cost.
+/// Backing capacity grows as needed and is never shrunk.
+#[derive(Debug, Default, Clone)]
+pub struct Scratch {
     known: Vec<bool>,
     values: Vec<Bound>,
     missing: Vec<u32>,
+    assigned: Vec<bool>,
     queue: VecDeque<u32>,
+}
+
+impl Scratch {
+    /// Creates a new empty scratch buffer set. The first call to
+    /// [`CompiledDag::propagate_with_scratch`] will grow it to the DAG size.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resize all buffers to length `n` and reset their contents. Backing
+    /// capacity is reused; never shrunk.
+    fn prepare(&mut self, n: usize) {
+        self.known.clear();
+        self.known.resize(n, false);
+        self.values.clear();
+        self.values.resize(n, (0, 0));
+        self.missing.clear();
+        self.missing.resize(n, 0);
+        self.assigned.clear();
+        self.assigned.resize(n, false);
+        self.queue.clear();
+        if self.queue.capacity() < n {
+            self.queue.reserve(n - self.queue.capacity());
+        }
+    }
 }
 
 impl Default for CompiledDag {
@@ -748,10 +829,6 @@ impl CompiledDag {
             coefs: Vec::new(),
             parents: Vec::new(),
             input_count: Vec::new(),
-            known: Vec::new(),
-            values: Vec::new(),
-            missing: Vec::new(),
-            queue: VecDeque::new(),
         }
     }
 
@@ -800,11 +877,6 @@ impl CompiledDag {
                 self.input_count.push(cnt);
             }
         }
-
-        // Extend scratch buffers
-        self.known.push(false);
-        self.values.push((0, 0));
-        self.missing.push(0);
     }
 
     /// Optimized compilation from a Vec of (String, Node) pairs.
@@ -861,12 +933,6 @@ impl CompiledDag {
             }
         }
 
-        // Initialize scratch buffers
-        let known = vec![false; n];
-        let values = vec![(0, 0); n];
-        let missing = vec![0; n];
-        let queue = VecDeque::new();
-
         Self {
             id_to_ix,
             ix_to_id,
@@ -874,10 +940,6 @@ impl CompiledDag {
             coefs,
             parents,
             input_count,
-            known,
-            values,
-            missing,
-            queue,
         }
     }
 
@@ -930,68 +992,80 @@ impl CompiledDag {
         })
     }
 
-    /// Propagate with new assignments. Reuses internal buffers (no realloc).
+    /// Propagate with new assignments.
+    ///
+    /// Pure compute over the compiled topology — does not mutate `self`.
+    /// Allocates fresh scratch buffers each call; for hot loops, prefer
+    /// [`CompiledDag::propagate_with_scratch`] to reuse buffers.
     pub fn propagate<K>(
-        &mut self,
+        &self,
         assignments: impl IntoIterator<Item = (K, Bound)>,
-    ) -> Result<HashMap<String, Bound>>
+    ) -> ComputeResult<HashMap<String, Bound>>
+    where
+        K: ToString,
+    {
+        let mut scratch = Scratch::new();
+        self.propagate_with_scratch(assignments, &mut scratch)
+    }
+
+    /// Propagate with new assignments, reusing the storage in `scratch`.
+    ///
+    /// Equivalent to [`CompiledDag::propagate`], but reuses the buffers in
+    /// `scratch` instead of allocating fresh ones. The same `Scratch` may be
+    /// reused across many calls, including across DAGs of different sizes —
+    /// it is grown as needed and reset on entry.
+    pub fn propagate_with_scratch<K>(
+        &self,
+        assignments: impl IntoIterator<Item = (K, Bound)>,
+        scratch: &mut Scratch,
+    ) -> ComputeResult<HashMap<String, Bound>>
     where
         K: ToString,
     {
         let n = self.kind.len();
+        scratch.prepare(n);
 
-        // reset scratch buffers fast
-        self.queue.clear();
-        self.known.fill(false);
+        let Scratch { known, values, missing, assigned, queue } = scratch;
 
         // missing starts as input_count for composites, 0 for primitives
         for i in 0..n {
-            self.missing[i] = match self.kind[i] {
+            missing[i] = match self.kind[i] {
                 Kind::Composite { .. } => self.input_count[i],
                 Kind::Primitive { .. } => 0,
             };
         }
 
-        // Apply initial assignments: enqueue any nodes that exist in dag
-        // (We don't compute them yet; we compute when popped)
-        // Store assigned bounds temporarily in values + a flag, or use a small HashMap.
-        // Fast path: store assignment directly in values and mark a separate "assigned" bitset.
-        // We'll reuse known? No: known means "computed". Let's use values + assigned bool vec.
-        // To keep memory down, we can temporarily use missing's sign, but keep it clear:
-        let mut assigned = vec![false; n]; // if you want even faster, store this in struct too
-
         for (k, b) in assignments.into_iter() {
             let s = k.to_string();
             if let Some(&ix) = self.id_to_ix.get(&s) {
                 let i = ix as usize;
-                self.values[i] = b;
+                values[i] = b;
                 assigned[i] = true;
-                self.queue.push_back(ix);
+                queue.push_back(ix);
             }
         }
 
         // Enqueue all primitives (assigned or not) to start propagation
-        for i in 0..n {
-            if matches!(self.kind[i], Kind::Primitive { .. }) {
-                if !assigned[i] {
-                    self.queue.push_back(i as u32);
+        for (i, _) in assigned.iter().enumerate().take(n) {
+            if matches!(self.kind[i], Kind::Primitive { .. })
+                && !assigned[i] {
+                    queue.push_back(i as u32);
                 }
-            }
         }
 
         // Main loop
-        while let Some(ix) = self.queue.pop_front() {
+        while let Some(ix) = queue.pop_front() {
             let i = ix as usize;
-            if self.known[i] {
+            if known[i] {
                 continue;
             }
 
             match self.kind[i] {
                 Kind::Primitive { inherent } => {
                     let out = if assigned[i] {
-                        let b = self.values[i];
+                        let b = values[i];
                         if b.0 < inherent.0 || b.1 > inherent.1 {
-                            return Err(PldagError::NodeOutOfBounds {
+                            return Err(ComputeError::NodeOutOfBounds {
                                 node_id: self.ix_to_id[i].clone(),
                                 got_bound: b,
                                 expected_bound: inherent,
@@ -1002,16 +1076,16 @@ impl CompiledDag {
                         inherent
                     };
 
-                    self.values[i] = out;
-                    self.known[i] = true;
+                    values[i] = out;
+                    known[i] = true;
 
                     // notify parents
                     for &p in &self.parents[i] {
                         let pi = p as usize;
-                        if self.missing[pi] > 0 {
-                            self.missing[pi] -= 1;
-                            if self.missing[pi] == 0 {
-                                self.queue.push_back(p);
+                        if missing[pi] > 0 {
+                            missing[pi] -= 1;
+                            if missing[pi] == 0 {
+                                queue.push_back(p);
                             }
                         }
                     }
@@ -1025,21 +1099,21 @@ impl CompiledDag {
                     for k in start..end {
                         let c = self.coefs[k];
                         let inp = c.input as usize;
-                        if !self.known[inp] {
+                        if !known[inp] {
                             // not ready; queue its input and self again (rare if missing is correct)
-                            self.queue.push_back(c.input);
-                            self.queue.push_back(ix);
+                            queue.push_back(c.input);
+                            queue.push_back(ix);
                             sum = (0, 0);
                             break;
                         }
-                        sum = bound_add(sum, bound_multiply(c.coef, self.values[inp]));
+                        sum = bound_add(sum, bound_multiply(c.coef, values[inp]));
                     }
 
                     // If we bailed out due to missing input, skip for now
                     // (use a flag instead of sum==(0,0) because that can be real)
                     let mut ok = true;
                     for k in start..end {
-                        if !self.known[self.coefs[k].input as usize] {
+                        if !known[self.coefs[k].input as usize] {
                             ok = false;
                             break;
                         }
@@ -1051,16 +1125,16 @@ impl CompiledDag {
                     let biased = bound_add(sum, (bias_lo, bias_lo));
                     let out = ((biased.0 >= 0) as i32, (biased.1 >= 0) as i32);
 
-                    self.values[i] = out;
-                    self.known[i] = true;
+                    values[i] = out;
+                    known[i] = true;
 
                     // notify parents
                     for &p in &self.parents[i] {
                         let pi = p as usize;
-                        if self.missing[pi] > 0 {
-                            self.missing[pi] -= 1;
-                            if self.missing[pi] == 0 {
-                                self.queue.push_back(p);
+                        if missing[pi] > 0 {
+                            missing[pi] -= 1;
+                            if missing[pi] == 0 {
+                                queue.push_back(p);
                             }
                         }
                     }
@@ -1072,11 +1146,34 @@ impl CompiledDag {
         // If you only need the bounds for a subset, you can return something else.
         let mut out = HashMap::with_capacity(n);
         for i in 0..n {
-            if self.known[i] {
-                out.insert(self.ix_to_id[i].clone(), self.values[i]);
+            if known[i] {
+                out.insert(self.ix_to_id[i].clone(), values[i]);
             }
         }
         Ok(out)
+    }
+
+    /// Propagate many assignment sets against the same DAG, reusing a single
+    /// internal [`Scratch`] across iterations.
+    ///
+    /// Equivalent to calling [`CompiledDag::propagate`] in a loop, but allocates
+    /// the working buffers once instead of per call. Fails fast: returns
+    /// `Err` on the first set that produces a [`ComputeError`], discarding
+    /// any earlier results.
+    pub fn propagate_many<K, I, J>(
+        &self,
+        assignment_sets: J,
+    ) -> ComputeResult<Vec<HashMap<String, Bound>>>
+    where
+        K: ToString,
+        I: IntoIterator<Item = (K, Bound)>,
+        J: IntoIterator<Item = I>,
+    {
+        let mut scratch = Scratch::new();
+        assignment_sets
+            .into_iter()
+            .map(|a| self.propagate_with_scratch(a, &mut scratch))
+            .collect()
     }
 }
 
@@ -1094,6 +1191,12 @@ pub struct Pldag {
     validate_coeffs: bool,
 }
 
+impl Default for Pldag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Pldag {
     /// Creates a new empty PL-DAG.
     ///
@@ -1106,6 +1209,10 @@ impl Pldag {
         }
     }
 
+    /// Creates a new PL-DAG backed by a caller-supplied [`NodeStoreTrait`].
+    ///
+    /// Use this to plug in a database-backed or otherwise-customised storage
+    /// layer instead of the default in-memory store.
     pub fn new_custom(storage: Arc<dyn NodeStoreTrait>) -> Pldag {
         Pldag { storage, validate_coeffs: true }
     }
@@ -1122,13 +1229,13 @@ impl Pldag {
     ///
     /// - `dag`: mapping from node name to Node (Primitive / Composite)
     /// - `assumptions`: mapping from node name to assumed bound,
-    ///    e.g. "A" -> (1,1) means boolean node A is TRUE.
+    ///   e.g. "A" -> (1,1) means boolean node A is TRUE.
     ///
     /// Returns an HashMap of final bounds for all nodes (primitives + composite booleans).
     pub fn tighten(
         dag: &CompiledDag,
         assumptions: &HashMap<String, Bound>,
-    ) -> Result<HashMap<String, Bound>> {
+    ) -> ComputeResult<HashMap<String, Bound>> {
         let n = dag.kind.len();
 
         // 1. Initialize bounds for all nodes
@@ -1156,7 +1263,7 @@ impl Pldag {
         loop {
             iter += 1;
             if iter > max_iters {
-                return Err(PldagError::MaxIterationsExceeded { max_iters });
+                return Err(ComputeError::MaxIterationsExceeded { max_iters });
             }
 
             let mut changed = false;
@@ -1216,10 +1323,20 @@ impl Pldag {
         Ok(result)
     }
 
+    /// Returns a smaller [`CompiledDag`] with the given variables substituted by constants.
+    ///
+    /// Each node listed in `fixed` is removed from the DAG, and every composite
+    /// that referenced it has the substituted contribution folded into its
+    /// `bias_lo` term. Use this to specialise a generic model for a specific
+    /// scenario before propagating or solving.
+    ///
+    /// # Arguments
+    /// * `dag` — the source DAG to reduce.
+    /// * `fixed` — mapping from node id to the integer value to substitute.
     pub fn reduce(
         dag: &CompiledDag,
         fixed: &HashMap<String, i32>,
-    ) -> Result<CompiledDag> {
+    ) -> ComputeResult<CompiledDag> {
         let mut nodes: Vec<(String, Node)> = Vec::new();
 
         'nodes: for (node_idx, kind) in dag.kind.iter().enumerate() {
@@ -1288,152 +1405,13 @@ impl Pldag {
     /// # Returns
     /// Complete assignment including bounds for all reachable nodes
     pub fn propagate_dag<K>(
-        dag: &mut CompiledDag,
+        dag: &CompiledDag,
         assignments: impl IntoIterator<Item = (K, Bound)>,
-    ) -> Result<Assignment>
+    ) -> ComputeResult<Assignment>
     where
         K: ToString,
     {
         dag.propagate(assignments)
-    }
-
-    /// Propagates bounds through the DAG bottom-up.
-    ///
-    /// Starting from the given variable assignments, this method computes bounds
-    /// for all composite nodes by propagating constraints upward through the DAG.
-    ///
-    /// # Arguments
-    /// * `assignment` - Initial assignment of bounds to variables
-    /// * `to_root` - Optional root node to end propagation at
-    ///
-    /// # Returns
-    /// Complete assignment including bounds for all reachable nodes
-    pub fn propagate<K>(&self, assignments: impl IntoIterator<Item = (K, Bound)>) -> Result<Assignment>
-    where
-        K: ToString,
-    {
-        // Convert assignments into HashMap<String, Bound>
-        let assignments_map: HashMap<String, Bound> = assignments
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-
-        // Initialize results with the provided assignments
-        let mut results: HashMap<String, Bound> = HashMap::new();
-
-        // Extract all keys from the initial assignments
-        let mut queue: Vec<String> = assignments_map.keys().cloned().collect();
-
-        // Keep track of visited nodes to avoid reprocessing1
-        let mut visited = HashSet::new();
-        while queue.len() > 0 {
-            let mut next_batch: Vec<String> = Vec::new();
-            let mut processed_this_batch: Vec<String> = Vec::new();
-            let batch_incoming = self.storage.get_nodes(&queue);
-
-            // Loop over all nodes in queue
-            while let Some(node_id) = queue.pop() {
-                if visited.contains(&node_id) {
-                    continue; // Already processed this node
-                }
-
-                let node = match batch_incoming.get(&node_id) {
-                    Some(n) => n,
-                    None => {
-                        // We just don't care if user applied a node that's not in the dag
-                        continue
-                    }
-                };
-
-                match node {
-                    Node::Primitive(primitive) => {
-                        // If this node is in the initial assignments, use that value
-                        if let Some(bound) = assignments_map.get(&node_id) {
-
-                            // However, if the assigned bound is looser than the primitive's inherent bound,
-                            // we return an error since it is not allowed.
-                            if bound.0 < primitive.0 || bound.1 > primitive.1 {
-                                return Err(PldagError::NodeOutOfBounds {
-                                    node_id: node_id.clone(),
-                                    got_bound: *bound,
-                                    expected_bound: *primitive,
-                                });
-                            }
-
-                            results.insert(node_id.to_string(), *bound);
-                        } else {
-                            // Otherwise, use the primitive's inherent bound
-                            results.insert(node_id.to_string(), *primitive);
-                        }
-                        visited.insert(node_id.clone());
-                        processed_this_batch.push(node_id.clone());
-                    }
-                    Node::Composite(constraint) => {
-                        // Filter coefficients and calculate bias
-                        let bias: i32 = constraint.bias.0; // Using lower bound for bias
-                        let coefficients = &constraint.coefficients;
-
-                        // Check if all input variables are in results
-                        let all_inputs_available = coefficients
-                            .iter()
-                            .all(|(input_id, _)| results.contains_key(input_id));
-
-                        if !all_inputs_available {
-                            // Put the missing coefficients back to the queue
-                            for (input_id, _) in coefficients.iter() {
-                                if !results.contains_key(input_id) && !next_batch.contains(input_id)
-                                {
-                                    next_batch.push(input_id.clone());
-                                }
-                            }
-                            // Not all inputs are ready, push this node back to the queue
-                            next_batch.push(node_id.clone());
-                            continue;
-                        }
-
-                        // Get coefficient values from results
-                        let mut coef_vals = HashMap::new();
-                        for (input_id, _) in coefficients.iter() {
-                            if let Some(val) = results.get(input_id) {
-                                coef_vals.insert(input_id.clone(), val.clone());
-                            }
-                        }
-
-                        // Calculate result
-                        // Instead of allocating a Vec, accumulate directly.
-                        let summed = coefficients.iter().fold((0, 0), |acc, (input_id, coef)| {
-                            let bound = coef_vals.get(input_id).unwrap();
-                            let prod = bound_multiply(*coef, *bound);
-                            bound_add(acc, prod)
-                        });
-                        let biased = bound_add(summed, (bias, bias));
-
-                        results.insert(
-                            node_id.to_string(),
-                            ((biased.0 >= 0) as i32, (biased.1 >= 0) as i32),
-                        );
-                        visited.insert(node_id.clone());
-                        processed_this_batch.push(node_id.clone());
-                    }
-                }
-            }
-
-            // Add dependent nodes to next batch
-            let batch_outgoing = self.storage.get_parent_ids(&processed_this_batch);
-            for outgoing in batch_outgoing.values() {
-                for dependent in outgoing.into_iter() {
-                    if !visited.contains(dependent) && !next_batch.contains(&dependent) {
-                        next_batch.push(dependent.clone());
-                    }
-                }
-            }
-
-            if !next_batch.is_empty() {
-                queue = next_batch;
-            }
-        }
-
-        Ok(results)
     }
 
     /// Computes ranks for all nodes in the DAG.
@@ -1444,7 +1422,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A HashMap of node IDs to their corresponding ranks
-    pub fn ranks(cd: &CompiledDag) -> Result<HashMap<ID, usize>> {
+    pub fn ranks(cd: &CompiledDag) -> ComputeResult<HashMap<ID, usize>> {
         let n = cd.kind.len();
         let mut ranks: Vec<usize> = vec![0; n];
         let mut in_degree: Vec<usize> = vec![0; n];
@@ -1493,7 +1471,7 @@ impl Pldag {
         if processed != n {
             // Find a node that wasn't processed (part of the cycle)
             let cycle_node_idx = in_degree.iter().position(|&deg| deg > 0).unwrap_or(0);
-            return Err(PldagError::CycleDetected {
+            return Err(ComputeError::CycleDetected {
                 node_id: cd.ix_to_id[cycle_node_idx].clone(),
             });
         }
@@ -1507,10 +1485,16 @@ impl Pldag {
         Ok(result)
     }
 
+    /// Returns the node ids of `dag` in topological order.
+    ///
+    /// Producers (primitives, plus composites whose inputs are already settled)
+    /// appear before their consumers. The pre-built `dependency_map` —
+    /// typically obtained from [`Pldag::dependency_map`] — is supplied
+    /// separately to avoid recomputing it across calls.
     pub fn topological_sort(
         dag: &HashMap<ID, Node>,
         dependency_map: &HashMap<ID, Vec<ID>>,
-    ) -> Result<Vec<ID>> {
+    ) -> ComputeResult<Vec<ID>> {
         let mut in_degree: HashMap<String, usize> =
             dag.keys().map(|node_id| (node_id.clone(), 0)).collect();
 
@@ -1534,8 +1518,7 @@ impl Pldag {
             .collect();
         let mut result: Vec<String> = Vec::new();
 
-        while !queue.is_empty() {
-            let node_id = queue.pop().unwrap();
+        while let Some(node_id) = queue.pop() {
             result.push(node_id.clone());
             if let Some(child_ids) = dependency_map.get(&node_id) {
                 for child_id in child_ids {
@@ -1553,6 +1536,11 @@ impl Pldag {
         Ok(result)
     }
 
+    /// Builds the child-id map for a raw `(id -> Node)` view of a DAG.
+    ///
+    /// For each node, the returned map lists the ids of nodes it depends on:
+    /// composite nodes list their coefficient inputs; primitive nodes map to
+    /// an empty list. This is the input expected by [`Pldag::topological_sort`].
     pub fn dependency_map(dag: &HashMap<ID, Node>) -> HashMap<ID, Vec<ID>> {
         dag.iter()
             .map(|(node_id, node)| {
@@ -1569,105 +1557,6 @@ impl Pldag {
             .collect()
     }
 
-    #[cfg(feature = "glpk")]
-    #[cfg_attr(feature = "trace", tracing::instrument(skip_all))]
-    /// Solve the supplied objectives in-process with GLPK.
-    /// Only available when the crate is compiled with `--features glpk`
-    ///
-    /// # Arguments
-    /// * `roots` - Vector of root node IDs to define the sub-DAG for solving. If empty, uses the entire DAG.
-    /// * `objectives` - Vector of ID to value mapping representing different objective functions to solve
-    /// * `assume` - Fixed variable assignments to apply before solving
-    /// * `maximize` - If true, maximizes the objective; if false, minimizes it
-    ///
-    /// # Returns
-    /// Vector of optional valued assignments, one for each objective. None if infeasible.
-    pub fn solve(
-        cd: &CompiledDag,
-        objectives: Vec<HashMap<&str, f64>>,
-        assume: HashMap<&str, Bound>,
-        maximize: bool,
-    ) -> Result<Vec<Option<Assignment>>> {
-        use glpk_rust::{
-            solve_ilps, IntegerSparseMatrix, Solution, SparseLEIntegerPolyhedron, Status, Variable,
-        };
-
-        // Convert the PL-DAG to a polyhedron representation
-        let polyhedron = Self::to_sparse_polyhedron(cd, true)?;
-
-        // Validate assume that the bounds does not override column bounds
-        for (key, bound) in assume.iter() {
-            if let Some(idx) = polyhedron.columns.iter().position(|col| col == key) {
-                let col_bound = polyhedron.column_bounds[idx];
-                if bound.0 < col_bound.0 || bound.1 > col_bound.1 {
-                    return Err(PldagError::NodeOutOfBounds {
-                        node_id: key.to_string(),
-                        got_bound: *bound,
-                        expected_bound: col_bound,
-                    });
-                }
-            }
-        }
-
-        // Convert sparse matrix to the format expected by glpk-rust
-        // NOTE: As soon as the polyhedron is made, the order of the columns are vital.
-        // Therefore always use polyhedron.columns to get the variable names in the correct order.
-        let mut glpk_matrix = SparseLEIntegerPolyhedron {
-            a: IntegerSparseMatrix {
-                rows: polyhedron.a.rows.iter().map(|&x| x as i32).collect(),
-                cols: polyhedron.a.cols.iter().map(|&x| x as i32).collect(),
-                vals: polyhedron.a.vals.iter().map(|&x| -1 * x).collect(),
-            },
-            b: polyhedron.b.iter().map(|&x| (0, -1 * x)).collect(),
-            variables: polyhedron
-                .columns
-                .iter()
-                .zip(polyhedron.column_bounds.iter())
-                .map(|(key, bound)| Variable {
-                    id: key.as_str(),
-                    bound: *assume.get(key.as_str()).unwrap_or(&(bound.0, bound.1)),
-                })
-                .collect(),
-            double_bound: false,
-        };
-
-        // If there are no constraints, insert a dummy row
-        if glpk_matrix.a.rows.is_empty() {
-            for i in 0..polyhedron.columns.len() {
-                glpk_matrix.a.rows.push(0);
-                glpk_matrix.a.cols.push(i as i32);
-                glpk_matrix.a.vals.push(0);
-            }
-            glpk_matrix.b.push((0, 0));
-        }
-
-        let solutions: Vec<Solution>;
-        #[cfg(feature = "trace")]
-        {
-            let span = tracing::span!(tracing::Level::INFO, "solve_ilps");
-            solutions = span.in_scope(|| solve_ilps(&mut glpk_matrix, objectives, maximize, false));
-        }
-        #[cfg(not(feature = "trace"))]
-        {
-            solutions = solve_ilps(&mut glpk_matrix, objectives, maximize, false);
-        }
-
-        return Ok(solutions
-            .iter()
-            .map(|solution| {
-                if solution.status == Status::Optimal {
-                    let mut assignment: Assignment = HashMap::new();
-                    for col_name in polyhedron.columns.iter() {
-                        let value = solution.solution.get(col_name).unwrap_or(&0);
-                        assignment.insert(col_name.clone(), (*value, *value));
-                    }
-                    Some(assignment)
-                } else {
-                    None
-                }
-            })
-            .collect());
-    }
 
     /// Extracts a sub-DAG containing all nodes reachable from the given roots.
     /// NOTE: if roots is empty, returns the entire DAG.
@@ -1677,10 +1566,10 @@ impl Pldag {
     ///
     /// # Returns
     /// A HashMap of node IDs to their corresponding nodes in the sub-DAG
-    pub fn sub_dag(&self, roots: Vec<ID>) -> Result<CompiledDag> {
+    pub async fn sub_dag(&self, roots: Vec<ID>) -> ModelResult<CompiledDag> {
         // If no roots, return entire DAG
         if roots.is_empty() {
-            return Ok(self.dag());
+            return self.dag().await;
         }
 
         let mut queue: Vec<String> = roots;
@@ -1693,12 +1582,12 @@ impl Pldag {
 
         while !queue.is_empty() {
             // Batch fetch incoming edges for current batch
-            let all_incoming = self.storage.get_nodes(&queue);
+            let all_incoming = self.storage.get_nodes(&queue).await?;
 
             // Check that we got all nodes from queue
             for node_id in queue.iter() {
                 if !all_incoming.contains_key(node_id) {
-                    return Err(PldagError::NodeNotFound { node_id: node_id.to_string() });
+                    return Err(ModelError::NodeNotFound { node_id: node_id.to_string() });
                 }
             }
 
@@ -1729,9 +1618,15 @@ impl Pldag {
         Ok(CompiledDag::compile(nodes))
     }
 
-    pub fn dag(&self) -> CompiledDag {
-        let all_nodes = self.storage.get_all_nodes().into_iter().collect::<Vec<_>>();
-        CompiledDag::compile(all_nodes)
+    /// Compiles the entire model into a [`CompiledDag`].
+    ///
+    /// This is the recommended starting point for evaluation: build your
+    /// model with `set_*` methods, call `dag()` once, then propagate or
+    /// solve against the resulting compact representation as many times as
+    /// you like. See [`Pldag::sub_dag`] to compile only a subset.
+    pub async fn dag(&self) -> ModelResult<CompiledDag> {
+        let all_nodes = self.storage.get_all_nodes().await?.into_iter().collect::<Vec<_>>();
+        Ok(CompiledDag::compile(all_nodes))
     }
 
     /// Converts the PL-DAG to a sparse polyhedron for ILP solving.
@@ -1748,7 +1643,7 @@ impl Pldag {
     pub fn to_sparse_polyhedron(
         cd: &CompiledDag,
         double_binding: bool,
-    ) -> Result<SparsePolyhedron> {
+    ) -> ComputeResult<SparsePolyhedron> {
         let ncols = cd.kind.len();
 
         // Pre-count composites + NNZ to reserve capacity
@@ -1874,7 +1769,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `SparsePolyhedron` with full constraint encoding
-    pub fn to_sparse_polyhedron_default(cd: &CompiledDag) -> Result<SparsePolyhedron> {
+    pub fn to_sparse_polyhedron_default(cd: &CompiledDag) -> ComputeResult<SparsePolyhedron> {
         Self::to_sparse_polyhedron(cd, true)
     }
 
@@ -1885,7 +1780,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` representing the DAG constraints
-    pub fn to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> Result<DensePolyhedron> {
+    pub fn to_dense_polyhedron(cd: &CompiledDag, double_binding: bool) -> ComputeResult<DensePolyhedron> {
         // Convert to sparse polyhedron first
         let sparse_polyhedron = Self::to_sparse_polyhedron(cd, double_binding)?;
         // Convert sparse to dense polyhedron
@@ -1896,7 +1791,7 @@ impl Pldag {
     ///
     /// # Returns
     /// A `DensePolyhedron` with all constraint options enabled
-    pub fn to_dense_polyhedron_default(cd: &CompiledDag) -> Result<DensePolyhedron> {
+    pub fn to_dense_polyhedron_default(cd: &CompiledDag) -> ComputeResult<DensePolyhedron> {
         Self::to_dense_polyhedron(cd, true)
     }
 
@@ -1944,8 +1839,8 @@ impl Pldag {
     /// * `id` - The unique identifier of the node to retrieve
     /// # Returns
     /// An `Option<Node>` which is Some(Node) if found, or None if not found
-    pub fn get_node(&self, id: &str) -> Option<Node> {
-        self.storage.get_nodes(&[id.to_string()]).get(id).cloned()
+    pub async fn get_node(&self, id: &str) -> ModelResult<Option<Node>> {
+        Ok(self.storage.get_nodes(&[id.to_string()]).await?.get(id).cloned())
     }
 
     /// Retrieves multiple nodes by their IDs.
@@ -1955,30 +1850,26 @@ impl Pldag {
     /// * `ids` - A slice of unique identifiers for the nodes to retrieve
     /// # Returns
     /// A `HashMap<String, Node>` mapping each requested ID to its corresponding Node.
-    pub fn get_nodes(&self, ids: &[String]) -> HashMap<String, Node> {
-        self.storage.get_nodes(ids)
+    pub async fn get_nodes(&self, ids: &[String]) -> ModelResult<HashMap<String, Node>> {
+        Ok(self.storage.get_nodes(ids).await?)
     }
 
     /// Deletes a node from the PL-DAG by its ID.
     ///
     /// # Arguments
     /// * `id` - The unique identifier of the node to delete
-    /// 
-    /// Note: 
-    ///
-    /// Returns nothing.
-    pub fn delete_node(&mut self, id: &str) -> Result<()> {
-        let parents = self.storage.get_parent_ids(&[id.to_string()]);
+    pub async fn delete_node(&self, id: &str) -> ModelResult<()> {
+        let parents = self.storage.get_parent_ids(&[id.to_string()]).await?;
         if let Some(parents) = parents.get(id) {
             if !parents.is_empty() {
-                return Err(PldagError::NodeReferenced {
+                return Err(ModelError::NodeReferenced {
                     node_id: id.to_string(),
                     referencing_nodes: parents.clone(),
                 });
             }
         }
-        self.storage.delete(id);
-        return Ok(());
+        self.storage.delete(id).await?;
+        Ok(())
     }
 
     /// Creates a primitive (leaf) variable with the specified bounds.
@@ -1989,8 +1880,8 @@ impl Pldag {
     /// # Arguments
     /// * `id` - Unique identifier for the variable
     /// * `bound` - The allowed range (min, max) for this variable
-    pub fn set_primitive(&mut self, id: &str, bound: Bound) -> Result<ID> {
-        self.storage.set_node(id, Node::Primitive(bound));
+    pub async fn set_primitive(&self, id: &str, bound: Bound) -> ModelResult<ID> {
+        self.storage.set_node(id, Node::Primitive(bound)).await?;
         Ok(id.to_string())
     }
 
@@ -2002,7 +1893,7 @@ impl Pldag {
     /// # Arguments
     /// * `ids` - Iterator of unique identifiers for the variables
     /// * `bound` - The common bound to apply to all variables
-    pub fn set_primitives<K>(&mut self, ids: impl IntoIterator<Item = K>, bound: Bound) -> Result<Vec<ID>>
+    pub async fn set_primitives<K>(&self, ids: impl IntoIterator<Item = K>, bound: Bound) -> ModelResult<Vec<ID>>
     where
         K: ToString,
     {
@@ -2012,7 +1903,7 @@ impl Pldag {
             .map(|id| (id.as_str(), &bound))
             .collect();
 
-        self.storage.set_primitives(&primitives);
+        self.storage.set_primitives(&primitives).await?;
 
         Ok(unique_ids.into_iter().collect())
     }
@@ -2028,25 +1919,30 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any coefficient ID doesn't exist
-    pub fn set_gelineq<K>(
-        &mut self,
+    pub async fn set_gelineq<K>(
+        &self,
         coefficient_variables: impl IntoIterator<Item = (K, i32)>,
         bias: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
-    {
+    {   
         // Ensure coefficients have unique keys by summing duplicate values
         let mut unique_coefficients: HashMap<ID, i32> = HashMap::new();
         for (key, value) in coefficient_variables {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
 
+        // Require at least one coefficient to prevent empty constraints
+        if unique_coefficients.len() == 0 {
+            return Err(ModelError::EmptyConstraint);
+        }
+
         // Check that all coefficient IDs exist in storage
         if self.validate_coeffs {
             for coef_id in unique_coefficients.keys() {
-                if !self.storage.node_exists(coef_id) {
-                    return Err(PldagError::NodeNotFound {
+                if !self.storage.node_exists(coef_id).await? {
+                    return Err(ModelError::NodeNotFound {
                         node_id: coef_id.clone(),
                     });
                 }
@@ -2069,7 +1965,7 @@ impl Pldag {
         };
 
         // Insert the constraint as a node
-        self.storage.set_node(&id, Node::Composite(constraint));
+        self.storage.set_node(&id, Node::Composite(constraint)).await?;
 
         Ok(id.to_string())
     }
@@ -2082,22 +1978,28 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_atleast<K>(
-        &mut self,
+    pub async fn set_atleast<K>(
+        &self,
         references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
     {
-        self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value)
+        self.set_gelineq(references.into_iter().map(|x| (x, 1)), -value).await
     }
 
-    pub fn set_atleast_ref<K, V>(
-        &mut self,
+    /// Like [`Pldag::set_atleast`], but the threshold is itself a node reference.
+    ///
+    /// Encodes `sum(references) >= value`, where `value` is the id of an
+    /// existing node whose current bound is used as the threshold. Useful
+    /// for expressing data-driven constraints where the right-hand side is
+    /// not known statically.
+    pub async fn set_atleast_ref<K, V>(
+        &self,
         references: impl IntoIterator<Item = K>,
         value: V,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         V: ToString,
@@ -2108,7 +2010,7 @@ impl Pldag {
                 .map(|x| (x.to_string(), 1))
                 .chain([(value.to_string(), -1)]),
             0,
-        )
+        ).await
     }
 
     /// Creates an "at most" constraint: sum(variables) <= value.
@@ -2119,22 +2021,26 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_atmost<K>(
-        &mut self,
+    pub async fn set_atmost<K>(
+        &self,
         references: impl IntoIterator<Item = K>,
         value: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
     {
-        self.set_gelineq(references.into_iter().map(|x| (x, -1)), value)
+        self.set_gelineq(references.into_iter().map(|x| (x, -1)), value).await
     }
 
-    pub fn set_atmost_ref<K, V>(
-        &mut self,
+    /// Like [`Pldag::set_atmost`], but the cap is itself a node reference.
+    ///
+    /// Encodes `sum(references) <= value`, where `value` is the id of an
+    /// existing node whose current bound is used as the cap.
+    pub async fn set_atmost_ref<K, V>(
+        &self,
         references: impl IntoIterator<Item = K>,
         value: V,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         V: ToString,
@@ -2145,7 +2051,7 @@ impl Pldag {
                 .map(|x| (x.to_string(), -1))
                 .chain([(value.to_string(), 1)]),
             0,
-        )
+        ).await
     }
 
     /// Creates an equality constraint: sum(variables) == value.
@@ -2158,33 +2064,37 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_equal<K, I>(
-        &mut self,
+    pub async fn set_equal<K, I>(
+        &self,
         references: I,
         value: i32,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         I: IntoIterator<Item = K> + Clone,
     {
-        let ub = self.set_atleast(references.clone(), value)?;
-        let lb = self.set_atmost(references, value)?;
-        self.set_and(vec![ub, lb])
+        let ub = self.set_atleast(references.clone(), value).await?;
+        let lb = self.set_atmost(references, value).await?;
+        self.set_and(vec![ub, lb]).await
     }
 
-    pub fn set_equal_ref<K, V, I>(
-        &mut self,
+    /// Like [`Pldag::set_equal`], but the target sum is itself a node reference.
+    ///
+    /// Encodes `sum(references) == value` by conjoining `set_atleast_ref` and
+    /// `set_atmost_ref` against the same `value` node.
+    pub async fn set_equal_ref<K, V, I>(
+        &self,
         references: I,
         value: V,
-    ) -> Result<ID>
+    ) -> ModelResult<ID>
     where
         K: ToString,
         V: ToString,
         I: IntoIterator<Item = K> + Clone,
     {
-        let ub = self.set_atleast_ref(references.clone(), value.to_string())?;
-        let lb = self.set_atmost_ref(references, value)?;
-        self.set_and(vec![ub, lb])
+        let ub = self.set_atleast_ref(references.clone(), value.to_string()).await?;
+        let lb = self.set_atmost_ref(references, value).await?;
+        self.set_and(vec![ub, lb]).await
     }
 
     /// Creates a logical AND constraint.
@@ -2197,14 +2107,14 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_and<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_and<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
         let length = unique_references.len();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()), length as i32)
+        self.set_atleast(unique_references.iter().map(|x| x.as_str()), length as i32).await
     }
 
     /// Creates a logical OR constraint.
@@ -2217,13 +2127,13 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_or<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_or<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1)
+        self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1).await
     }
 
     /// Creates a logical OPTIONAL constraint.
@@ -2236,13 +2146,14 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_optional<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_optional<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()), unique_references.len() as i32)
+        let len = unique_references.len() as i32;
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), len).await
     }
 
     /// Creates a logical NAND constraint.
@@ -2255,7 +2166,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_nand<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_nand<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
@@ -2265,7 +2176,7 @@ impl Pldag {
         self.set_atmost(
             unique_references.iter().map(|x| x.as_str()),
             length as i32 - 1,
-        )
+        ).await
     }
 
     /// Creates a logical NOR constraint.
@@ -2278,13 +2189,13 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_nor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_nor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0).await
     }
 
     /// Creates a logical NOT constraint.
@@ -2297,13 +2208,13 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_not<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_not<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)
+        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0).await
     }
 
     /// Creates a logical XOR constraint.
@@ -2316,15 +2227,15 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_xor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_xor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str()))?;
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1)?;
-        self.set_and(vec![atleast, atmost])
+        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str())).await?;
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1).await?;
+        self.set_and(vec![atleast, atmost]).await
     }
 
     /// Creates a logical XNOR constraint.
@@ -2337,15 +2248,15 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_xnor<K>(&mut self, references: impl IntoIterator<Item = K>) -> Result<ID>
+    pub async fn set_xnor<K>(&self, references: impl IntoIterator<Item = K>) -> ModelResult<ID>
     where
         K: ToString,
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2)?;
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0)?;
-        self.set_or(vec![atleast, atmost])
+        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2).await?;
+        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0).await?;
+        self.set_or(vec![atleast, atmost]).await
     }
 
     /// Creates a logical IMPLICATION constraint: condition -> consequence.
@@ -2359,13 +2270,13 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_imply<C, Q>(&mut self, condition: C, consequence: Q) -> Result<ID>
+    pub async fn set_imply<C, Q>(&self, condition: C, consequence: Q) -> ModelResult<ID>
     where
         C: ToString,
         Q: ToString,
     {
-        let not_condition = self.set_not(vec![condition.to_string()])?;
-        self.set_or(vec![not_condition, consequence.to_string()])
+        let not_condition = self.set_not(vec![condition.to_string()]).await?;
+        self.set_or(vec![not_condition, consequence.to_string()]).await
     }
 
     /// Creates a logical EQUIVALENCE constraint: lhs <-> rhs.
@@ -2379,7 +2290,7 @@ impl Pldag {
     ///
     /// # Returns
     /// The unique ID assigned to this constraint, or an error if any reference doesn't exist
-    pub fn set_equiv<L, R>(&mut self, lhs: L, rhs: R) -> Result<ID>
+    pub async fn set_equiv<L, R>(&self, lhs: L, rhs: R) -> ModelResult<ID>
     where
         L: ToString,
         R: ToString,
@@ -2388,9 +2299,9 @@ impl Pldag {
         let lhs_str = lhs.to_string();
         let rhs_str = rhs.to_string();
 
-        let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()])?;
-        let imply_rl = self.set_not(vec![rhs_str, lhs_str])?;
-        self.set_or(vec![imply_lr, imply_rl])
+        let imply_lr = self.set_and(vec![lhs_str.clone(), rhs_str.clone()]).await?;
+        let imply_rl = self.set_not(vec![rhs_str, lhs_str]).await?;
+        self.set_or(vec![imply_lr, imply_rl]).await
     }
 }
 
@@ -2401,8 +2312,8 @@ mod tests {
     // Create a helper function that generates all primitive combinations
     // for a given PLDAG model, propagates them, and compares against the
     // corresponding polyhedron evaluations.
-    fn primitive_combinations(model: &Pldag) -> Vec<HashMap<String, i32>> {
-        let dag = model.dag();
+    async fn primitive_combinations(model: &Pldag) -> Vec<HashMap<String, i32>> {
+        let dag = model.dag().await.unwrap();
         let primitives = Pldag::get_primitives(&dag);
         let mut combinations: Vec<HashMap<String, i32>> = Vec::new();
 
@@ -2427,8 +2338,8 @@ mod tests {
     ///   3) run `assume(root=1)` on the polyhedron  
     ///   4) evaluate the shrunken polyhedron on the same assignments  
     ///   5) assert they agree at `root`.
-    fn evaluate_model_polyhedron(model: &Pldag, poly: &DensePolyhedron, root: &String) {
-        for combo in primitive_combinations(model) {
+    async fn evaluate_model_polyhedron(model: &Pldag, poly: &DensePolyhedron, root: &String) {
+        for combo in primitive_combinations(model).await {
             // build an HashMap<&str,Bound> as propagate expects
             let interp = combo
                 .iter()
@@ -2436,7 +2347,7 @@ mod tests {
                 .collect::<HashMap<&str, Bound>>();
 
             // what the DAG says the root can be
-            let prop = model.propagate(interp).unwrap();
+            let prop = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
             let model_root_val = *prop.get(root).unwrap();
 
             // now shrink the polyhedron by assuming root=1
@@ -2471,16 +2382,18 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_compiled_dag_sorts(){
-        let mut model = Pldag::new();
-        let _ = model.set_primitive("x", (0, 1));
-        let _ = model.set_primitive("y", (0, 1));
-        let _ = model.set_primitive("z", (0, 1));
-        let id = model.set_and(vec!["x", "y", "z"]).unwrap();
+    #[tokio::test]
+    async fn test_compiled_dag_sorts(){
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let id = model.set_and(vec!["x", "y", "z"]).await.unwrap();
 
         let ids: Vec<_> = ["x", "y", "z", &id].iter().map(|s| s.to_string()).collect();
-        let nodes_first: Vec<_> = model.get_nodes(&ids).into_iter().map(|(id, node)| (id, node)).collect();
+        let nodes_result = model.get_nodes(&ids).await;
+        assert!(nodes_result.is_ok(), "Failed to get nodes: {:?}", nodes_result.err());
+        let nodes_first: Vec<_> = nodes_result.unwrap().into_iter().collect();
         let nodes_second = vec![nodes_first[1].clone(), nodes_first[0].clone(), nodes_first[3].clone(), nodes_first[2].clone()]; // shuffle the order
 
         let dag_first = CompiledDag::compile(nodes_first);
@@ -2491,14 +2404,14 @@ mod tests {
         assert_eq!(dag_first.coefs, dag_second.coefs, "Compiled DAGs coefficients differ");
     }
 
-    #[test]
-    fn test_propagate() {
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        let root = model.set_and(vec!["x", "y"]).unwrap();
-        let mut dag = model.dag();
-        let result = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+    #[tokio::test]
+    async fn test_propagate() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let root = model.set_and(vec!["x", "y"]).await.unwrap();
+        let dag = model.dag().await.unwrap();
+        let result = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get(&root).unwrap(), &(0, 1));
@@ -2506,16 +2419,16 @@ mod tests {
         let mut assignments = HashMap::new();
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
-        let result = model.propagate(assignments).unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
-        let mut dag = model.dag();
-        let result = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let root = model.set_xor(vec!["x", "y", "z"]).await.unwrap();
+        let dag = model.dag().await.unwrap();
+        let result = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
         assert_eq!(result.get("y").unwrap(), &(0, 1));
         assert_eq!(result.get("z").unwrap(), &(0, 1));
@@ -2525,176 +2438,273 @@ mod tests {
         assignments.insert("x", (1, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments).unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = HashMap::new();
         assignments.insert("x", (0, 1));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (1, 1));
-        let result = model.propagate(assignments).unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(0, 0));
 
         let mut assignments = HashMap::new();
         assignments.insert("x", (0, 0));
         assignments.insert("y", (1, 1));
         assignments.insert("z", (0, 0));
-        let result = model.propagate(assignments).unwrap();
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         // Test propagation to specific root only and check that the others are not included in the result
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let or_1 = model.set_or(vec!["x", "z"]).unwrap();
-        let or_2 = model.set_or(vec!["y", "z"]).unwrap();
-        let or_3 = model.set_or(vec!["x", "y"]).unwrap();
-        let root = model.set_and(vec![or_1.clone(), or_2.clone(), or_3.clone()]).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let or_1 = model.set_or(vec!["x", "z"]).await.unwrap();
+        let or_2 = model.set_or(vec!["y", "z"]).await.unwrap();
+        let or_3 = model.set_or(vec!["x", "y"]).await.unwrap();
+        let root = model.set_and(vec![or_1.clone(), or_2.clone(), or_3.clone()]).await.unwrap();
         let mut assignments = HashMap::new();
         assignments.insert("x", (1, 1));
-        let mut sub_dag = model.sub_dag(vec![or_1.clone()]).unwrap();
-        let result = Pldag::propagate_dag(&mut sub_dag, assignments).unwrap();
+        let sub_dag = model.sub_dag(vec![or_1.clone()]).await.unwrap();
+        let result = Pldag::propagate_dag(&sub_dag, assignments).unwrap();
         assert_eq!(result.get("x").unwrap(), &(1, 1));
         assert_eq!(result.get(&or_1).unwrap(), &(1, 1));
-        assert!(result.get(&or_2).is_none());
-        assert!(result.get(&or_3).is_none());
-        assert!(result.get(&root).is_none());
+        assert!(!result.contains_key(&or_2));
+        assert!(!result.contains_key(&or_3));
+        assert!(!result.contains_key(&root));
+    }
+
+    #[tokio::test]
+    async fn test_propagate_with_scratch_reuse_across_dags() {
+        // Build two DAGs of different sizes and run propagate_with_scratch
+        // against the same Scratch buffer; results must match a fresh
+        // CompiledDag::propagate call. This exercises the grow-only resize
+        // path and verifies no state leaks between calls.
+        let small = Pldag::new();
+        let _ = small.set_primitive("a", (0, 1)).await;
+        let _ = small.set_primitive("b", (0, 1)).await;
+        let small_root = small.set_and(vec!["a", "b"]).await.unwrap();
+        let small_dag = small.dag().await.unwrap();
+
+        let large = Pldag::new();
+        let _ = large.set_primitive("p", (0, 1)).await;
+        let _ = large.set_primitive("q", (0, 1)).await;
+        let _ = large.set_primitive("r", (0, 1)).await;
+        let _ = large.set_primitive("s", (0, 1)).await;
+        let or_pq = large.set_or(vec!["p", "q"]).await.unwrap();
+        let or_rs = large.set_or(vec!["r", "s"]).await.unwrap();
+        let large_root = large.set_and(vec![or_pq, or_rs]).await.unwrap();
+        let large_dag = large.dag().await.unwrap();
+
+        let mut scratch = Scratch::new();
+
+        // First call: small DAG, both primitives = 1.
+        let mut a1 = HashMap::new();
+        a1.insert("a", (1, 1));
+        a1.insert("b", (1, 1));
+        let with = small_dag
+            .propagate_with_scratch(a1.clone(), &mut scratch)
+            .unwrap();
+        let baseline = small_dag.propagate(a1).unwrap();
+        assert_eq!(with, baseline);
+        assert_eq!(with.get(&small_root).unwrap(), &(1, 1));
+
+        // Second call: larger DAG (grows the buffers), partial assignment.
+        let mut a2 = HashMap::new();
+        a2.insert("p", (1, 1));
+        a2.insert("r", (1, 1));
+        let with = large_dag
+            .propagate_with_scratch(a2.clone(), &mut scratch)
+            .unwrap();
+        let baseline = large_dag.propagate(a2).unwrap();
+        assert_eq!(with, baseline);
+        assert_eq!(with.get(&large_root).unwrap(), &(1, 1));
+
+        // Third call: back to the small DAG with different assignment.
+        // This exercises the case where buffer capacity exceeds the DAG
+        // size — the prefix must be cleanly reset.
+        let mut a3 = HashMap::new();
+        a3.insert("a", (0, 0));
+        a3.insert("b", (1, 1));
+        let with = small_dag
+            .propagate_with_scratch(a3.clone(), &mut scratch)
+            .unwrap();
+        let baseline = small_dag.propagate(a3).unwrap();
+        assert_eq!(with, baseline);
+        assert_eq!(with.get(&small_root).unwrap(), &(0, 0));
+    }
+
+    #[tokio::test]
+    async fn test_propagate_many_matches_repeated_propagate() {
+        // propagate_many must produce the same result, in order, as repeated
+        // standalone propagate calls — and propagate the first error eagerly.
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let root = model.set_or(vec!["x", "y"]).await.unwrap();
+        let dag = model.dag().await.unwrap();
+
+        let sets: Vec<Vec<(&str, Bound)>> = vec![
+            vec![("x", (1, 1))],
+            vec![("x", (0, 0)), ("y", (0, 0))],
+            vec![("y", (1, 1))],
+        ];
+
+        let many = dag.propagate_many(sets.clone()).unwrap();
+        let one_by_one: Vec<_> = sets
+            .iter()
+            .map(|s| dag.propagate(s.clone()).unwrap())
+            .collect();
+        assert_eq!(many, one_by_one);
+        assert_eq!(many[0][&root], (1, 1));
+        assert_eq!(many[1][&root], (0, 0));
+        assert_eq!(many[2][&root], (1, 1));
+
+        // Fail-fast: an out-of-bounds assignment surfaces as Err on that set,
+        // and downstream sets are not returned.
+        let bad_sets: Vec<Vec<(&str, Bound)>> = vec![
+            vec![("x", (1, 1))],
+            vec![("x", (2, 2))], // out of (0, 1)
+            vec![("y", (1, 1))],
+        ];
+        let err = dag.propagate_many(bad_sets).unwrap_err();
+        assert!(matches!(err, ComputeError::NodeOutOfBounds { .. }));
     }
 
     /// XOR already covered; test the OR gate
-    #[test]
-    fn test_propagate_or_gate() {
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("b".into(), (0, 1));
-        let or_root = model.set_or(vec!["a", "b"]).unwrap();
+    #[tokio::test]
+    async fn test_propagate_or_gate() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("b", (0, 1)).await;
+        let or_root = model.set_or(vec!["a", "b"]).await.unwrap();
 
         // No assignment: both inputs full [0,1], output [0,1]
-        let mut dag = model.dag();
-        let res = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let dag = model.dag().await.unwrap();
+        let res = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(res["a"], (0, 1));
         assert_eq!(res["b"], (0, 1));
         assert_eq!(res[&or_root], (0, 1));
 
         // a=1 ⇒ output must be 1
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("a".into(), (1, 1));
-        let res = model.propagate(interp).unwrap();
+        interp.insert("a", (1, 1));
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&or_root], (1, 1));
 
         // both zero ⇒ output zero
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("a".into(), (0, 0));
-        interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp).unwrap();
+        interp.insert("a", (0, 0));
+        interp.insert("b", (0, 0));
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&or_root], (0, 0));
 
         // partial: a=[0,1], b=0 ⇒ output=[0,1]
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("b".into(), (0, 0));
-        let res = model.propagate(interp).unwrap();
+        interp.insert("b", (0, 0));
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&or_root], (0, 1));
     }
 
     /// Test the NOT gate (negation)
-    #[test]
-    fn test_propagate_not_gate() {
-        let mut model = Pldag::new();
-        model.set_primitive("p".into(), (0, 1));
-        let not_root = model.set_not(vec!["p"]).unwrap();
+    #[tokio::test]
+    async fn test_propagate_not_gate() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let not_root = model.set_not(vec!["p"]).await.unwrap();
 
         // no assignment ⇒ [0,1]
-        let mut dag = model.dag();
-        let res = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let dag = model.dag().await.unwrap();
+        let res = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(res["p"], (0, 1));
         assert_eq!(res[&not_root], (0, 1));
 
         // p = 0 ⇒ root = 1
-        let mut interp = HashMap::<String, Bound>::new();
-        interp.insert("p".into(), (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let mut interp = HashMap::<&str, Bound>::new();
+        interp.insert("p", (0, 0));
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&not_root], (1, 1));
 
         // p = 1 ⇒ root = 0
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("p".into(), (1, 1));
-        let res = model.propagate(interp).unwrap();
+        interp.insert("p", (1, 1));
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&not_root], (0, 0));
     }
 
-    #[test]
-    fn test_to_polyhedron_and() {
-        let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0, 1));
-        m.set_primitive("y", (0, 1));
-        let root = m.set_and(vec!["x", "y"]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &root);
+    #[tokio::test]
+    async fn test_to_polyhedron_and() {
+        let m = Pldag::new();
+        let _ = m.set_primitive("x", (0, 1)).await;
+        let _ = m.set_primitive("y", (0, 1)).await;
+        let root = m.set_and(vec!["x", "y"]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &root).await;
     }
 
-    #[test]
-    fn test_to_polyhedron_or() {
-        let mut m = Pldag::new();
-        m.set_primitive("a".into(), (0, 1));
-        m.set_primitive("b".into(), (0, 1));
-        m.set_primitive("c".into(), (0, 1));
-        let root = m.set_or(vec!["a", "b", "c"]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &root);
+    #[tokio::test]
+    async fn test_to_polyhedron_or() {
+        let m = Pldag::new();
+        let _ = m.set_primitive("a", (0, 1)).await;
+        let _ = m.set_primitive("b", (0, 1)).await;
+        let _ = m.set_primitive("c", (0, 1)).await;
+        let root = m.set_or(vec!["a", "b", "c"]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &root).await;
     }
 
-    #[test]
-    fn test_to_polyhedron_not() {
-        let mut m = Pldag::new();
-        m.set_primitive("p".into(), (0, 1));
-        let root = m.set_not(vec!["p"]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &root);
+    #[tokio::test]
+    async fn test_to_polyhedron_not() {
+        let m = Pldag::new();
+        let _ = m.set_primitive("p", (0, 1)).await;
+        let root = m.set_not(vec!["p"]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &root).await;
     }
 
-    #[test]
-    fn test_to_polyhedron_xor() {
-        let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0, 1));
-        m.set_primitive("y", (0, 1));
-        m.set_primitive("z".into(), (0, 1));
-        let root = m.set_xor(vec!["x", "y", "z"]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &root);
+    #[tokio::test]
+    async fn test_to_polyhedron_xor() {
+        let m = Pldag::new();
+        let _ = m.set_primitive("x", (0, 1)).await;
+        let _ = m.set_primitive("y", (0, 1)).await;
+        let _ = m.set_primitive("z", (0, 1)).await;
+        let root = m.set_xor(vec!["x", "y", "z"]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &root).await;
     }
 
-    #[test]
-    fn test_to_polyhedron_nested() {
+    #[tokio::test]
+    async fn test_to_polyhedron_nested() {
         // Build a small two‐level circuit:
         //   w = AND(x,y),  v = OR(w, NOT(z))
-        let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0, 1));
-        m.set_primitive("y", (0, 1));
-        m.set_primitive("z".into(), (0, 1));
+        let m = Pldag::new();
+        let _ = m.set_primitive("x", (0, 1)).await;
+        let _ = m.set_primitive("y", (0, 1)).await;
+        let _ = m.set_primitive("z", (0, 1)).await;
 
-        let w = m.set_and(vec!["x", "y"]).unwrap();
-        let nz = m.set_not(vec!["z"]).unwrap();
-        let v = m.set_or(vec![w.clone(), nz.clone()]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &v);
+        let w = m.set_and(vec!["x", "y"]).await.unwrap();
+        let nz = m.set_not(vec!["z"]).await.unwrap();
+        let v = m.set_or(vec![w.clone(), nz.clone()]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &v).await;
     }
 
     /// Nested/composed AND then XOR:
     ///   w = AND(x,y);  v = XOR(w,z)
-    #[test]
-    fn test_propagate_nested_composite() {
-        let mut model = Pldag::new();
-        model.set_primitive("x".into(), (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z".into(), (0, 1));
+    #[tokio::test]
+    async fn test_propagate_nested_composite() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
 
-        let w = model.set_and(vec!["x", "y"]).unwrap();
-        let v = model.set_xor(vec![w.clone(), "z".into()]).unwrap();
+        let w = model.set_and(vec!["x", "y"]).await.unwrap();
+        let v = model.set_xor(vec![w.clone(), "z".into()]).await.unwrap();
 
         // no assignment: everything [0,1]
-        let mut dag = model.dag();
-        let res = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let dag = model.dag().await.unwrap();
+        let res = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         for var in &["x", "y", "z"] {
             assert_eq!(res[*var], (0, 1), "{}", var);
         }
@@ -2706,7 +2716,7 @@ mod tests {
         interp.insert("x", (1, 1));
         interp.insert("y", (1, 1));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&w], (1, 1));
         assert_eq!(res[&v], (1, 1));
 
@@ -2715,7 +2725,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (1, 1));
         interp.insert("z", (1, 1));
-        let res = model.propagate(interp).unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (1, 1));
 
@@ -2724,7 +2734,7 @@ mod tests {
         interp.insert("x", (0, 0));
         interp.insert("y", (0, 0));
         interp.insert("z", (0, 0));
-        let res = model.propagate(interp).unwrap();
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp).unwrap();
         assert_eq!(res[&w], (0, 0));
         assert_eq!(res[&v], (0, 0));
     }
@@ -2732,29 +2742,29 @@ mod tests {
     /// If you ever get an inconsistent assignment (out‐of‐bounds for a primitive),
     /// propagate should leave it as given (or you could choose to clamp / panic)—here
     /// we simply check that nothing blows up.
-    #[test]
-    fn test_propagate_out_of_bounds_should_crash() {
-        let mut model = Pldag::new();
-        model.set_primitive("u".into(), (0, 1));
+    #[tokio::test]
+    async fn test_propagate_out_of_bounds_should_crash() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("u", (0, 1)).await;
 
         let mut interp = HashMap::<&str, Bound>::new();
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
-        interp.insert("u".into(), (5, 5));
-        let res = model.propagate(interp);
+        interp.insert("u", (5, 5));
+        let res = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
 
         // Assert that we did get an error
         assert!(res.is_err());
     }
 
-    #[test]
-    fn test_to_polyhedron() {
-        fn evaluate_model_polyhedron(model: &Pldag, polyhedron: &DensePolyhedron, root: &String) {
-            for combination in primitive_combinations(model) {
+    #[tokio::test]
+    async fn test_to_polyhedron() {
+        async fn evaluate_model_polyhedron(model: &Pldag, polyhedron: &DensePolyhedron, root: &String) {
+            for combination in primitive_combinations(model).await {
                 let assignments = combination
                     .iter()
                     .map(|(k, &v)| (k.as_str(), (v, v)))
                     .collect::<HashMap<&str, Bound>>();
-                let model_prop = model.propagate(assignments).unwrap();
+                let model_prop = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
                 let model_eval = *model_prop.get(root).unwrap();
                 let mut assumption = HashMap::new();
                 assumption.insert(root.clone(), 1);
@@ -2764,67 +2774,67 @@ mod tests {
             }
         }
 
-        let mut model: Pldag = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
-        let polyhedron: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&model, &polyhedron, &root);
+        let model: Pldag = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let root = model.set_xor(vec!["x", "y", "z"]).await.unwrap();
+        let polyhedron: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&model, &polyhedron, &root).await;
 
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        let root = model.set_and(vec!["x", "y"]).unwrap();
-        let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&model, &polyhedron, &root);
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let root = model.set_and(vec!["x", "y"]).await.unwrap();
+        let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&model, &polyhedron, &root).await;
 
-        let mut model: Pldag = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
-        let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&model, &polyhedron, &root);
+        let model: Pldag = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let root = model.set_xor(vec!["x", "y", "z"]).await.unwrap();
+        let polyhedron = Pldag::to_sparse_polyhedron_default(&model.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&model, &polyhedron, &root).await;
     }
 
     /// Single‐operand composites should act as identity: root == operand
-    #[test]
-    fn test_to_polyhedron_single_operand_identity() {
+    #[tokio::test]
+    async fn test_to_polyhedron_single_operand_identity() {
         // AND(x) == x
         {
-            let mut m = Pldag::new();
-            m.set_primitive("x".into(), (0, 1));
-            let root = m.set_and::<&str>(vec!["x"]).unwrap();
-            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-            evaluate_model_polyhedron(&m, &poly, &root);
+            let m = Pldag::new();
+            let _ = m.set_primitive("x", (0, 1)).await;
+            let root = m.set_and::<&str>(vec!["x"]).await.unwrap();
+            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+            evaluate_model_polyhedron(&m, &poly, &root).await;
         }
         // OR(y) == y
         {
-            let mut m = Pldag::new();
-            m.set_primitive("y", (0, 1));
-            let root = m.set_or(vec!["y"]).unwrap();
-            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-            evaluate_model_polyhedron(&m, &poly, &root);
+            let m = Pldag::new();
+            let _ = m.set_primitive("y", (0, 1)).await;
+            let root = m.set_or(vec!["y"]).await.unwrap();
+            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+            evaluate_model_polyhedron(&m, &poly, &root).await;
         }
         // XOR(z) == z
         {
-            let mut m = Pldag::new();
-            m.set_primitive("z".into(), (0, 1));
-            let root = m.set_xor(vec!["z"]).unwrap();
-            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-            evaluate_model_polyhedron(&m, &poly, &root);
+            let m = Pldag::new();
+            let _ = m.set_primitive("z", (0, 1)).await;
+            let root = m.set_xor(vec!["z"]).await.unwrap();
+            let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+            evaluate_model_polyhedron(&m, &poly, &root).await;
         }
     }
 
     /// Duplicate‐operand AND(x,x) should also behave like identity(x)
-    #[test]
-    fn test_to_polyhedron_duplicate_operands_and() {
-        let mut m = Pldag::new();
-        m.set_primitive("x".into(), (0, 1));
-        let root = m.set_and(vec!["x", "x"]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &root);
+    #[tokio::test]
+    async fn test_to_polyhedron_duplicate_operands_and() {
+        let m = Pldag::new();
+        let _ = m.set_primitive("x", (0, 1)).await;
+        let root = m.set_and(vec!["x", "x"]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &root).await;
     }
 
     /// Deeply nested 5‐level chain:
@@ -2832,28 +2842,28 @@ mod tests {
     ///    w2 = OR(w1,c)
     ///    w3 = XOR(w2,d)
     ///    root = NOT(w3)
-    #[test]
-    fn test_to_polyhedron_deeply_nested_chain() {
-        let mut m = Pldag::new();
+    #[tokio::test]
+    async fn test_to_polyhedron_deeply_nested_chain() {
+        let m = Pldag::new();
         // primitives a,b,c,d,e  (e unused but shows extra var)
         for &v in &["a", "b", "c", "d", "e"] {
-            m.set_primitive(v.into(), (0, 1));
+            let _ = m.set_primitive(v, (0, 1)).await;
         }
         let a = "a";
         let b = "b";
         let c = "c";
         let d = "d";
 
-        let w1 = m.set_and(vec![a, b]).unwrap();
-        let w2 = m.set_or(vec![w1.clone(), c.to_string()]).unwrap();
-        let w3 = m.set_xor(vec![w2.clone(), d.to_string()]).unwrap();
-        let root = m.set_not(vec![w3.clone()]).unwrap();
-        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).unwrap()).unwrap().into();
-        evaluate_model_polyhedron(&m, &poly, &root);
+        let w1 = m.set_and(vec![a, b]).await.unwrap();
+        let w2 = m.set_or(vec![w1.clone(), c.to_string()]).await.unwrap();
+        let w3 = m.set_xor(vec![w2.clone(), d.to_string()]).await.unwrap();
+        let root = m.set_not(vec![w3.clone()]).await.unwrap();
+        let poly: DensePolyhedron = Pldag::to_sparse_polyhedron_default(&m.sub_dag(vec![]).await.unwrap()).unwrap().into();
+        evaluate_model_polyhedron(&m, &poly, &root).await;
     }
 
-    #[test]
-    fn test_print_dense_matrix() {
+    #[tokio::test]
+    async fn test_print_dense_matrix() {
         let mut matrix = DenseIntegerMatrix::new(3, 3);
         matrix.data[0][0] = 1;
         matrix.data[0][2] = 2;
@@ -2865,8 +2875,8 @@ mod tests {
         assert_eq!(output, expected);
     }
 
-    #[test]
-    fn test_print_sparse_matrix() {
+    #[tokio::test]
+    async fn test_print_sparse_matrix() {
         let matrix = SparseIntegerMatrix {
             rows: vec![0, 0, 1, 2],
             cols: vec![0, 2, 0, 2],
@@ -2879,135 +2889,144 @@ mod tests {
         assert_eq!(output, expected);
     }
 
-    #[test]
-    fn test_equiv() {
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (0, 1));
-        let equiv = model.set_equiv("p", "q").unwrap();
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+    #[tokio::test]
+    async fn test_equiv() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
+        let equiv = model.set_equiv("p", "q").await.unwrap();
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
-        model.set_primitive("p", (1, 1));
-        model.set_primitive("q", (0, 1));
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let _ = model.set_primitive("p", (1, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
-        model.set_primitive("p", (1, 1));
-        model.set_primitive("q", (0, 0));
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let _ = model.set_primitive("p", (1, 1)).await;
+        let _ = model.set_primitive("q", (0, 0)).await;
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
 
-        model.set_primitive("p", (0, 0));
-        model.set_primitive("q", (0, 0));
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let _ = model.set_primitive("p", (0, 0)).await;
+        let _ = model.set_primitive("q", (0, 0)).await;
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
 
-        model.set_primitive("p", (1, 1));
-        model.set_primitive("q", (1, 1));
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let _ = model.set_primitive("p", (1, 1)).await;
+        let _ = model.set_primitive("q", (1, 1)).await;
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
     }
 
-    #[test]
-    fn test_imply() {
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (0, 1));
-        let equiv = model.set_imply("p", "q").unwrap();
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+    #[tokio::test]
+    async fn test_imply() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
+        let equiv = model.set_imply("p", "q").await.unwrap();
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 1));
 
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (1, 1));
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (1, 1)).await;
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(1, 1));
 
-        model.set_primitive("p", (1, 1));
-        model.set_primitive("q", (0, 0));
-        let mut dag = model.dag();
-        let propagated = Pldag::propagate_dag(&mut dag, Vec::<(&str, Bound)>::new()).unwrap();
+        let _ = model.set_primitive("p", (1, 1)).await;
+        let _ = model.set_primitive("q", (0, 0)).await;
+        let dag = model.dag().await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(propagated.get(&equiv).unwrap(), &(0, 0));
     }
 
-    #[test]
-    fn test_node_out_of_bounds_error() {
+    #[tokio::test]
+    async fn test_node_out_of_bounds_error() {
         // If we propagate a primitive with a bound that is outside its predefined range,
         // we should get a NodeOutOfBounds error.
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("p".into(), (2, 2)); // Out of bounds
-        let result = model.propagate(interp);
-        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        interp.insert("p", (2, 2)); // Out of bounds
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(matches!(result, Err(ComputeError::NodeOutOfBounds { .. })));
         
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("p".into(), (-1, 2)); // Out of bounds
-        let result = model.propagate(interp);
-        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        interp.insert("p", (-1, 2)); // Out of bounds
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(matches!(result, Err(ComputeError::NodeOutOfBounds { .. })));
         
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("p".into(), (-1, -1)); // Out of bounds
-        let result = model.propagate(interp);
-        assert!(matches!(result, Err(PldagError::NodeOutOfBounds { .. })));
+        interp.insert("p", (-1, -1)); // Out of bounds
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(matches!(result, Err(ComputeError::NodeOutOfBounds { .. })));
         
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
         let mut interp = HashMap::<&str, Bound>::new();
-        interp.insert("p".into(), (1, 1)); // Not out of bounds
-        let result = model.propagate(interp);
-        assert!(matches!(result, Ok(_)));
+        interp.insert("p", (1, 1)); // Not out of bounds
+        let result = Pldag::propagate_dag(&model.dag().await.unwrap(), interp);
+        assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_node_not_found_error_when_propagate() {
+    #[tokio::test]
+    async fn test_node_not_found_error_when_propagate() {
         // If we propagate a variable that does not exist in the model,
         // we should get a NodeNotFound error.
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
         // set_and will return an error when 'r' does not exist
-        let result = model.set_and(vec!["p", "q", "r"]);
-        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+        let result = model.set_and(vec!["p", "q", "r"]).await;
+        assert!(matches!(result, Err(ModelError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
-    #[test]
-    fn test_node_not_found_error_when_sub_dag() {
+    #[tokio::test]
+    async fn test_node_not_found_error_when_sub_dag() {
         // If we create a sub-dag with a variable that does not exist in the model,
         // we should get a NodeNotFound error.
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
         // set_and will return an error when 'r' does not exist
-        let result = model.set_and(vec!["p", "q", "r"]);
-        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+        let result = model.set_and(vec!["p", "q", "r"]).await;
+        assert!(matches!(result, Err(ModelError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
-    #[test]
-    fn test_node_not_found_error_when_to_polyhedron() {
+    #[tokio::test]
+    async fn test_node_not_found_error_when_to_polyhedron() {
         // If we convert to a polyhedron with a variable that does not exist in the model,
         // we should get a NodeNotFound error.
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (0, 1));
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
         // set_and will return an error when 'r' does not exist
-        let result = model.set_and(vec!["p", "q", "r"]);
-        assert!(matches!(result, Err(PldagError::NodeNotFound { node_id } ) if node_id == "r"));
+        let result = model.set_and(vec!["p", "q", "r"]).await;
+        assert!(matches!(result, Err(ModelError::NodeNotFound { node_id } ) if node_id == "r"));
     }
 
-    #[test]
-    fn binary_cardinality_all_forced_to_one_when_true() {
+    #[tokio::test]
+    async fn test_empty_constraint_error_when_set_gelineq_has_no_coefficients() {
+        // set_gelineq with no coefficient/variable pairs must reject the call,
+        // since an empty linear inequality is not a meaningful constraint.
+        let model = Pldag::new();
+        let result = model.set_gelineq(Vec::<(&str, i32)>::new(), 0).await;
+        assert!(matches!(result, Err(ModelError::EmptyConstraint)));
+    }
+
+    #[tokio::test]
+    async fn binary_cardinality_all_forced_to_one_when_true() {
         // x, y, z in [0,1]
         // A: x + y + z - 3 >= 0  <=>  x + y + z >= 3
         // A is assumed TRUE → x = y = z = 1
@@ -3029,8 +3048,8 @@ mod tests {
         assert_eq!(values.get("A"), Some(&(1, 1)));
     }
 
-    #[test]
-    fn binary_cardinality_false_does_not_tighten() {
+    #[tokio::test]
+    async fn binary_cardinality_false_does_not_tighten() {
         // x, y, z in [0,1]
         // A: x + y + z >= 3
         // A is FALSE → x + y + z <= 2
@@ -3053,8 +3072,8 @@ mod tests {
         assert_eq!(values.get("A"), Some(&(0, 0)));
     }
 
-    #[test]
-    fn chained_constraints_do_not_tighten_in_this_case() {
+    #[tokio::test]
+    async fn chained_constraints_do_not_tighten_in_this_case() {
         // x, y, z ∈ [0,3]
         // A: x + y - 3 >= 0  <=>  x + y >= 3
         // B: y + z - 3 >= 0  <=>  y + z >= 3
@@ -3089,8 +3108,8 @@ mod tests {
         assert_eq!(values.get("B"), Some(&(1, 1)));
     }
 
-    #[test]
-    fn composite_as_boolean_in_another_constraint() {
+    #[tokio::test]
+    async fn composite_as_boolean_in_another_constraint() {
         // A: x + y - 3 >= 0   (x + y >= 3), boolean node A
         // D: 5*A + z - 6 >= 0   (5*A + z >= 6)
         //
@@ -3134,8 +3153,8 @@ mod tests {
         assert_eq!(*y, (0, 5));
     }
 
-    #[test]
-    fn test_tighten_bounds_on_an_xor() {
+    #[tokio::test]
+    async fn test_tighten_bounds_on_an_xor() {
         // A = B + C >= 2
         // B = x + y + z >= 1
         // C = -x -y -z >= -1
@@ -3148,103 +3167,103 @@ mod tests {
         dag.insert("B".into(), cons(vec![("x", 1), ("y", 1), ("z", 1)], -1));
         dag.insert("C".into(), cons(vec![("x", -1), ("y", -1), ("z", -1)], 1));
         dag.insert("A".into(), cons(vec![("B", 1), ("C", 1)], -2));
-        let mut assumptions = HashMap::new();
-        assumptions.insert("A".into(), (1, 1));
-        assumptions.insert("x".into(), (1, 1));
+        let mut assumptions: HashMap<String, (i32, i32)> = HashMap::new();
+        assumptions.insert("A".to_string(), (1, 1));
+        assumptions.insert("x".to_string(), (1, 1));
         let values = Pldag::tighten(&dag, &assumptions).unwrap();
         assert_eq!(values.get("y"), Some(&(0, 0)));
         assert_eq!(values.get("z"), Some(&(0, 0)));
     }
 
-    #[test]
-    fn test_simple_sub_dag_with_xor() {
-        let mut model = Pldag::new();
-        model.set_primitive("x".into(), (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z".into(), (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z"]).unwrap();
-        let sub_dag = model.sub_dag(vec![root.clone()]).unwrap();
+    #[tokio::test]
+    async fn test_simple_sub_dag_with_xor() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let root = model.set_xor(vec!["x", "y", "z"]).await.unwrap();
+        let sub_dag = model.sub_dag(vec![root.clone()]).await.unwrap();
         assert!(sub_dag.get(&root).is_some());
     }
 
-    #[test]
-    fn test_delete_node_should_succeed() {
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("b".into(), (0, 1));
-        let and_node = model.set_and(vec!["a", "b"]).unwrap();
-        let delete_result = model.delete_node(&and_node);
+    #[tokio::test]
+    async fn test_delete_node_should_succeed() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("b", (0, 1)).await;
+        let and_node = model.set_and(vec!["a", "b"]).await.unwrap();
+        let delete_result = model.delete_node(&and_node).await;
         assert!(delete_result.is_ok());
-        assert!(model.get_node(&and_node).is_none());
+        assert!(model.get_node(&and_node).await.unwrap().is_none());
     }
 
-    #[test]
-    fn test_delete_primitives_should_succeed() {
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("b".into(), (0, 1));
-        let delete_result_a = model.delete_node(&"a");
-        let delete_result_b = model.delete_node(&"b");
+    #[tokio::test]
+    async fn test_delete_primitives_should_succeed() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("b", (0, 1)).await;
+        let delete_result_a = model.delete_node("a").await;
+        let delete_result_b = model.delete_node("b").await;
         assert!(delete_result_a.is_ok());
         assert!(delete_result_b.is_ok());
-        assert!(model.get_node(&"a").is_none());
-        assert!(model.get_node(&"b").is_none());
+        assert!(model.get_node("a").await.unwrap().is_none());
+        assert!(model.get_node("b").await.unwrap().is_none());
     }
 
-    #[test]
-    fn test_delete_node_should_fail_for_still_having_references() {
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("b".into(), (0, 1));
-        let and_node = model.set_and(vec!["a", "b"]).unwrap();
-        model.set_or(vec![and_node.clone(), "a".into()]).unwrap();
-        let delete_result = model.delete_node(&and_node);
+    #[tokio::test]
+    async fn test_delete_node_should_fail_for_still_having_references() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("b", (0, 1)).await;
+        let and_node = model.set_and(vec!["a", "b"]).await.unwrap();
+        model.set_or(vec![and_node.clone(), "a".into()]).await.unwrap();
+        let delete_result = model.delete_node(&and_node).await;
         assert!(delete_result.is_err());
     }
 
-    #[test]
-    fn test_compute_ranks() {
+    #[tokio::test]
+    async fn test_compute_ranks() {
 
         // Simple case: a and b are rank 0, and (a AND b) is rank 1
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("b".into(), (0, 1));
-        let and_node = model.set_and(vec!["a", "b"]).unwrap();
-        model.set_or(vec![and_node.clone(), "a".into()]).unwrap();
-        let ranks = Pldag::ranks(&mut model.dag()).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("b", (0, 1)).await;
+        let and_node = model.set_and(vec!["a", "b"]).await.unwrap();
+        model.set_or(vec![and_node.clone(), "a".into()]).await.unwrap();
+        let ranks = Pldag::ranks(&model.dag().await.unwrap()).unwrap();
         assert_eq!(ranks.get("a"), Some(&0));
         assert_eq!(ranks.get("b"), Some(&0));
         assert_eq!(ranks.get(&and_node), Some(&1));
 
         // More complex case 1
-        let mut model = Pldag::new();
-        model.set_primitive("x".into(), (0, 1));
-        model.set_primitive("y".into(), (0, 1));
-        let and_node = model.set_and(vec!["x", "y"]).unwrap();
-        let not_node = model.set_not(vec![and_node.clone()]).unwrap();
-        model.set_xor(vec![not_node.clone(), "x".into()]).unwrap();
-        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let and_node = model.set_and(vec!["x", "y"]).await.unwrap();
+        let not_node = model.set_not(vec![and_node.clone()]).await.unwrap();
+        model.set_xor(vec![not_node.clone(), "x".into()]).await.unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).await.unwrap()).unwrap();
         assert_eq!(ranks.get("x"), Some(&0));
         assert_eq!(ranks.get("y"), Some(&0));
         assert_eq!(ranks.get(&and_node), Some(&1));
         assert_eq!(ranks.get(&not_node), Some(&2));
 
         // More complex case 2
-        let mut model = Pldag::new();
-        model.set_primitive("p".into(), (0, 1));
-        model.set_primitive("q".into(), (0, 1));
-        let equiv_node = model.set_equiv("p", "q").unwrap();
-        let imply_node = model.set_imply("p", "q").unwrap();
-        model.set_or(vec![equiv_node.clone(), imply_node.clone()]).unwrap();
-        let ranks = Pldag::ranks(&model.sub_dag(vec![]).unwrap()).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
+        let equiv_node = model.set_equiv("p", "q").await.unwrap();
+        let imply_node = model.set_imply("p", "q").await.unwrap();
+        model.set_or(vec![equiv_node.clone(), imply_node.clone()]).await.unwrap();
+        let ranks = Pldag::ranks(&model.sub_dag(vec![]).await.unwrap()).unwrap();
         assert_eq!(ranks.get("p"), Some(&0));
         assert_eq!(ranks.get("q"), Some(&0));
         assert_eq!(ranks.get(&equiv_node), Some(&2));
         assert_eq!(ranks.get(&imply_node), Some(&2));
     }
 
-    #[test]
-    fn test_reduce() {
+    #[tokio::test]
+    async fn test_reduce() {
         // A = B + C + D >= 3
         // B = x + y >= 2
         // C = y + z >= 2
@@ -3256,58 +3275,58 @@ mod tests {
         // A = B + C >= 2
         // B = x + y >= 2
         // C = y + z >= 2
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("x".into(), (0, 1));
-        model.set_primitive("y".into(), (0, 1));
-        model.set_primitive("z".into(), (0, 1));
-        let D = model.set_and(vec!["a"]).unwrap();
-        let C = model.set_and(vec!["y", "z"]).unwrap();
-        let B = model.set_and(vec!["x", "y"]).unwrap();
-        let A = model.set_and(vec![B.clone(), C.clone(), D.clone()]).unwrap();
-        let mut fixed = HashMap::new();
-        fixed.insert("a".into(), 1);
-        fixed.insert(D.clone(), 1);
-        let dag = model.sub_dag(vec![A.clone()]).unwrap();
-        let mut reduced_dag = Pldag::reduce(&dag, &fixed).unwrap();
-        // Check that D and a is not in reduced DAG
-        assert!(reduced_dag.get(&D).is_none());
-        assert!(reduced_dag.get(&"a".to_string()).is_none());
-        // Check that A, B, C, x, y, z are in reduced DAG
-        assert!(reduced_dag.get(&A).is_some());
-        assert!(reduced_dag.get(&B).is_some());
-        assert!(reduced_dag.get(&C).is_some());
-        assert!(reduced_dag.get(&"x".to_string()).is_some());
-        assert!(reduced_dag.get(&"y".to_string()).is_some());
-        assert!(reduced_dag.get(&"z".to_string()).is_some());
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let d = model.set_and(vec!["a"]).await.unwrap();
+        let c = model.set_and(vec!["y", "z"]).await.unwrap();
+        let b = model.set_and(vec!["x", "y"]).await.unwrap();
+        let a = model.set_and(vec![b.clone(), c.clone(), d.clone()]).await.unwrap();
+        let mut fixed: HashMap<String, i32> = HashMap::new();
+        fixed.insert("a".to_string(), 1);
+        fixed.insert(d.to_string(), 1);
+        let dag = model.sub_dag(vec![a.clone()]).await.unwrap();
+        let reduced_dag = Pldag::reduce(&dag, &fixed).unwrap();
+        // check that d and a is not in reduced daG
+        assert!(reduced_dag.get(&d).is_none());
+        assert!(reduced_dag.get("a").is_none());
+        // check that a, b, c, x, y, z are in reduced DaG
+        assert!(reduced_dag.get(&a).is_some());
+        assert!(reduced_dag.get(&b).is_some());
+        assert!(reduced_dag.get(&c).is_some());
+        assert!(reduced_dag.get("x").is_some());
+        assert!(reduced_dag.get("y").is_some());
+        assert!(reduced_dag.get("z").is_some());
 
         // Propagate the reduced DAG with x = 1, y = 1, z = 1, which should satisfy A = 1, B = 1, C = 1
         let mut assignments = HashMap::new();
-        assignments.insert("x".to_string(), (1, 1));
-        assignments.insert("y".to_string(), (1, 1));
-        assignments.insert("z".to_string(), (1, 1));
-        let propagated = Pldag::propagate_dag(&mut reduced_dag, assignments).unwrap();
-        assert_eq!(propagated.get(&A).unwrap(), &(1, 1));
-        assert_eq!(propagated.get(&B).unwrap(), &(1, 1));
-        assert_eq!(propagated.get(&C).unwrap(), &(1, 1));
+        assignments.insert("x", (1, 1));
+        assignments.insert("y", (1, 1));
+        assignments.insert("z", (1, 1));
+        let propagated = Pldag::propagate_dag(&reduced_dag, assignments).unwrap();
+        assert_eq!(propagated.get(&a).unwrap(), &(1, 1));
+        assert_eq!(propagated.get(&b).unwrap(), &(1, 1));
+        assert_eq!(propagated.get(&c).unwrap(), &(1, 1));
     }
 
-    #[test]
-    fn test_propagte_with_id_not_in_dag_shoul_pass() {
-        let mut model = Pldag::new();
-        model.set_primitive("x".into(), (0, 1));
-        model.set_primitive("y".into(), (0, 1));
-        model.set_primitive("z".into(), (0, 1));
-        let root = model.set_and(vec!["x", "y", "z"]).unwrap();
+    #[tokio::test]
+    async fn test_propagte_with_id_not_in_dag_shoul_pass() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let root = model.set_and(vec!["x", "y", "z"]).await.unwrap();
         let mut assignments = HashMap::new();
         assignments.insert("x".to_string(), (1, 1));
         assignments.insert("y".to_string(), (1, 1));
         assignments.insert("z".to_string(), (1, 1));
-        let mut dag = model.sub_dag(vec![root.clone()]).unwrap();
-        let propagated = Pldag::propagate_dag(&mut dag, assignments.clone()).unwrap();
+        let dag = model.sub_dag(vec![root.clone()]).await.unwrap();
+        let propagated = Pldag::propagate_dag(&dag, assignments.clone()).unwrap();
         assert_eq!(propagated.get(&root).unwrap(), &(1, 1));
 
-        let propagated = model.propagate(assignments).unwrap();
+        let propagated = Pldag::propagate_dag(&model.dag().await.unwrap(), assignments).unwrap();
         assert_eq!(propagated.get(&root).unwrap(), &(1, 1));
     }
 
@@ -3315,14 +3334,14 @@ mod tests {
     // CompiledDag propagate tests
     // ========================================================================
 
-    #[test]
-    fn test_compiled_dag_propagate() {
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        let root = model.set_and(vec!["x", "y"]).unwrap();
+    #[tokio::test]
+    async fn test_compiled_dag_propagate() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let root = model.set_and(vec!["x", "y"]).await.unwrap();
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         let result = compiled.propagate(Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
@@ -3333,13 +3352,13 @@ mod tests {
         let result = compiled.propagate(assignments).unwrap();
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let root = model.set_xor(vec!["x", "y", "z".into()]).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let root = model.set_xor(vec!["x", "y", "z"]).await.unwrap();
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         let result = compiled.propagate(Vec::<(&str, Bound)>::new()).unwrap();
         assert_eq!(result.get("x").unwrap(), &(0, 1));
@@ -3360,34 +3379,34 @@ mod tests {
         assert_eq!(result.get(&root).unwrap(), &(1, 1));
 
         // Test propagation to specific root only and check that the others are not included in the result
-        let mut model = Pldag::new();
-        model.set_primitive("x", (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z", (0, 1));
-        let or_1 = model.set_or(vec!["x", "z"]).unwrap();
-        let or_2 = model.set_or(vec!["y", "z"]).unwrap();
-        let or_3 = model.set_or(vec!["x", "y"]).unwrap();
-        let root = model.set_and(vec![or_1.clone(), or_2.clone(), or_3.clone()]).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
+        let or_1 = model.set_or(vec!["x", "z"]).await.unwrap();
+        let or_2 = model.set_or(vec!["y", "z"]).await.unwrap();
+        let or_3 = model.set_or(vec!["x", "y"]).await.unwrap();
+        let root = model.set_and(vec![or_1.clone(), or_2.clone(), or_3.clone()]).await.unwrap();
 
-        let mut sub_dag = model.sub_dag(vec![or_1.clone()]).unwrap();
+        let sub_dag = model.sub_dag(vec![or_1.clone()]).await.unwrap();
 
         let assignments = vec![("x", (1, 1))];
         let result = sub_dag.propagate(assignments).unwrap();
         assert_eq!(result.get("x").unwrap(), &(1, 1));
         assert_eq!(result.get(&or_1).unwrap(), &(1, 1));
-        assert!(result.get(&or_2).is_none());
-        assert!(result.get(&or_3).is_none());
-        assert!(result.get(&root).is_none());
+        assert!(!result.contains_key(&or_2));
+        assert!(!result.contains_key(&or_3));
+        assert!(!result.contains_key(&root));
     }
 
-    #[test]
-    fn test_compiled_dag_propagate_or_gate() {
-        let mut model = Pldag::new();
-        model.set_primitive("a".into(), (0, 1));
-        model.set_primitive("b".into(), (0, 1));
-        let or_root = model.set_or(vec!["a", "b"]).unwrap();
+    #[tokio::test]
+    async fn test_compiled_dag_propagate_or_gate() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("a", (0, 1)).await;
+        let _ = model.set_primitive("b", (0, 1)).await;
+        let or_root = model.set_or(vec!["a", "b"]).await.unwrap();
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         // No assignment: both inputs full [0,1], output [0,1]
         let res = compiled.propagate(Vec::<(&str, Bound)>::new()).unwrap();
@@ -3411,13 +3430,13 @@ mod tests {
         assert_eq!(res[&or_root], (0, 1));
     }
 
-    #[test]
-    fn test_compiled_dag_propagate_not_gate() {
-        let mut model = Pldag::new();
-        model.set_primitive("p".into(), (0, 1));
-        let not_root = model.set_not(vec!["p"]).unwrap();
+    #[tokio::test]
+    async fn test_compiled_dag_propagate_not_gate() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let not_root = model.set_not(vec!["p"]).await.unwrap();
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         // no assignment ⇒ [0,1]
         let res = compiled.propagate(Vec::<(&str, Bound)>::new()).unwrap();
@@ -3435,17 +3454,17 @@ mod tests {
         assert_eq!(res[&not_root], (0, 0));
     }
 
-    #[test]
-    fn test_compiled_dag_propagate_nested_composite() {
-        let mut model = Pldag::new();
-        model.set_primitive("x".into(), (0, 1));
-        model.set_primitive("y", (0, 1));
-        model.set_primitive("z".into(), (0, 1));
+    #[tokio::test]
+    async fn test_compiled_dag_propagate_nested_composite() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let _ = model.set_primitive("z", (0, 1)).await;
 
-        let w = model.set_and(vec!["x", "y"]).unwrap();
-        let v = model.set_xor(vec![w.clone(), "z".into()]).unwrap();
+        let w = model.set_and(vec!["x", "y"]).await.unwrap();
+        let v = model.set_xor(vec![w.clone(), "z".into()]).await.unwrap();
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         // no assignment: everything [0,1]
         let res = compiled.propagate(Vec::<(&str, Bound)>::new()).unwrap();
@@ -3474,12 +3493,12 @@ mod tests {
         assert_eq!(res[&v], (0, 0));
     }
 
-    #[test]
-    fn test_compiled_dag_propagate_out_of_bounds_should_crash() {
-        let mut model = Pldag::new();
-        model.set_primitive("u".into(), (0, 1));
+    #[tokio::test]
+    async fn test_compiled_dag_propagate_out_of_bounds_should_crash() {
+        let model = Pldag::new();
+        let _ = model.set_primitive("u", (0, 1)).await;
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         // ← deliberately illegal: u ∈ {0,1} but we assign 5
         let assignments = vec![("u", (5, 5))];
@@ -3489,16 +3508,16 @@ mod tests {
         assert!(res.is_err());
     }
 
-    #[test]
-    fn test_compiled_dag_propagate_node_not_found_error_when_propagate() {
+    #[tokio::test]
+    async fn test_compiled_dag_propagate_node_not_found_error_when_propagate() {
         // If we propagate a variable that does not exist in the compiled dag,
         // the assignment should just be ignored (it won't crash, but won't affect anything)
-        let mut model = Pldag::new();
-        model.set_primitive("p", (0, 1));
-        model.set_primitive("q", (0, 1));
-        let root = model.set_and(vec!["p", "q"]).unwrap();
+        let model = Pldag::new();
+        let _ = model.set_primitive("p", (0, 1)).await;
+        let _ = model.set_primitive("q", (0, 1)).await;
+        let root = model.set_and(vec!["p", "q"]).await.unwrap();
 
-        let mut compiled = model.sub_dag(vec![]).unwrap();
+        let compiled = model.sub_dag(vec![]).await.unwrap();
 
         // Propagate with a nonexistent variable "r"
         let assignments = vec![("p", (1, 1)), ("q", (1, 1)), ("r", (1, 1))];

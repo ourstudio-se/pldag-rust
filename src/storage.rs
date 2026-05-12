@@ -1,77 +1,93 @@
 use crate::Bound;
+use crate::error::{StorageError, StorageResult};
 use crate::pldag::Node;
+use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-/// Abstract interface for key-value storage backends
+/// Abstract interface for key-value storage backends.
+///
+/// All methods are async to allow database-backed implementations. The provided
+/// `InMemoryStore` resolves immediately without yielding to the runtime.
+#[async_trait]
 pub trait KeyValueStore: Send + Sync {
     /// Get all key-value pairs
-    fn get_all(&self) -> HashMap<String, Value>;
+    async fn get_all(&self) -> StorageResult<HashMap<String, Value>>;
 
     /// Get value for key
-    fn get(&self, key: &str) -> Option<Value>;
+    async fn get(&self, key: &str) -> StorageResult<Option<Value>>;
 
     /// Set value for key
-    fn set(&self, key: &str, value: Value);
+    async fn set(&self, key: &str, value: Value) -> StorageResult<()>;
 
-    // Set multiple key-value pairs
-    fn mset(&self, kv_pairs: &[(String, Value)]);
+    /// Set multiple key-value pairs
+    async fn mset(&self, kv_pairs: &[(String, Value)]) -> StorageResult<()>;
 
     /// Check if key exists
-    fn exists(&self, key: &str) -> bool;
+    async fn exists(&self, key: &str) -> StorageResult<bool>;
 
-    /// Get all keys matching pattern
-    fn keys(&self) -> Vec<String>;
+    /// Get all keys
+    async fn keys(&self) -> StorageResult<Vec<String>>;
 
     /// Batch get multiple keys, returns map with found key-value pairs
-    fn mget(&self, keys: &[String]) -> HashMap<String, Value>;
+    async fn mget(&self, keys: &[String]) -> StorageResult<HashMap<String, Value>>;
 
     /// Delete a key
-    fn delete(&self, key: &str);
+    async fn delete(&self, key: &str) -> StorageResult<()>;
 
     /// Get all key-value pairs with keys starting with the given prefix
-    fn get_prefix(&self, prefix: &str) -> HashMap<String, Value>;
+    async fn get_prefix(&self, prefix: &str) -> StorageResult<HashMap<String, Value>>;
 }
 
-/// Abstract interface for key-value storage backends
+/// Abstract interface for node storage, layered on top of a `KeyValueStore`.
+#[async_trait]
 pub trait NodeStoreTrait: Send + Sync {
-    // Get all nodes
-    fn get_all_nodes(&self) -> HashMap<String, Node>;
+    /// Get all nodes
+    async fn get_all_nodes(&self) -> StorageResult<HashMap<String, Node>>;
 
-    /// Batch get multiple ids, returns list with None for missing ids
-    fn get_nodes(&self, ids: &[String]) -> HashMap<String, Node>;
+    /// Batch get multiple ids, returns map with only the ids that exist
+    async fn get_nodes(&self, ids: &[String]) -> StorageResult<HashMap<String, Node>>;
 
     /// Set node for id
-    fn set_node(&self, id: &str, node: Node);
+    async fn set_node(&self, id: &str, node: Node) -> StorageResult<()>;
 
-    fn set_primitives(&self, primitives: &[(&str, &Bound)]);
+    /// Bulk-set primitive nodes
+    async fn set_primitives(&self, primitives: &[(&str, &Bound)]) -> StorageResult<()>;
 
     /// Check if node exists
-    fn node_exists(&self, id: &str) -> bool;
+    async fn node_exists(&self, id: &str) -> StorageResult<bool>;
 
-    /// Get all ids
-    fn node_ids(&self) -> Vec<String>;
+    /// Get all node ids
+    async fn node_ids(&self) -> StorageResult<Vec<String>>;
 
-    /// Delete a node by id
-    /// NOTE: Make sure get_parents won't return any deleted node IDs
-    fn delete(&self, id: &str);
+    /// Delete a node by id.
+    /// NOTE: callers must ensure `get_parent_ids` won't return any deleted node IDs
+    /// (this method clears outgoing references for composite nodes automatically).
+    async fn delete(&self, id: &str) -> StorageResult<()>;
 
-    /// Get all parent node ids that has an edge pointing to the given id
-    fn get_parent_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>>;
+    /// Get all parent node ids that have an edge pointing to the given id
+    async fn get_parent_ids(&self, ids: &[String]) -> StorageResult<HashMap<String, Vec<String>>>;
 
     /// Get all children node ids that the given id points to
-    fn get_children_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>>;
+    async fn get_children_ids(&self, ids: &[String]) -> StorageResult<HashMap<String, Vec<String>>>;
 
     /// Get a reference to the underlying KeyValueStore for custom storage needs
     fn get_kv_store(&self) -> &dyn KeyValueStore;
 }
 
+/// Default [`NodeStoreTrait`] implementation, layered on top of any [`KeyValueStore`].
+///
+/// `NodeStore` handles JSON (de)serialization of [`Node`] values and tracks
+/// the reverse-edge "outgoing" rows used to support efficient deletions and
+/// parent lookups. Pair it with [`InMemoryStore`] for tests, or with a
+/// custom backend (e.g. Redis, Postgres, S3) for persistence.
 pub struct NodeStore {
     data: Arc<dyn KeyValueStore>,
 }
 
 impl NodeStore {
+    /// Wraps an existing [`KeyValueStore`] in a [`NodeStore`].
     pub fn new(store: Arc<dyn KeyValueStore>) -> Self {
         Self { data: store }
     }
@@ -80,163 +96,227 @@ impl NodeStore {
     pub fn store(&self) -> &dyn KeyValueStore {
         &*self.data
     }
+
+    /// Removes `parent` from each `__outgoing__<child>` row.
+    ///
+    /// Used both when deleting a composite and when overwriting one whose
+    /// coefficient set has shrunk — both leave behind backward-reference
+    /// rows that must be rewritten so `get_parent_ids` doesn't return
+    /// phantom edges.
+    async fn remove_outgoing(&self, child_ids: &[String], parent: &str) -> StorageResult<()> {
+        if child_ids.is_empty() {
+            return Ok(());
+        }
+        let mut current = self.get_parent_ids(child_ids).await?;
+        for child in child_ids {
+            let entry = current.entry(child.clone()).or_default();
+            entry.retain(|ref_id| ref_id != parent);
+            let key = format!("__outgoing__{}", child);
+            let serialized = serde_json::to_value(&entry).map_err(|e| {
+                StorageError::Serialization {
+                    key: key.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            self.data.set(&key, serialized).await?;
+        }
+        Ok(())
+    }
 }
 
+fn to_value_for(key: &str, node: &Node) -> StorageResult<Value> {
+    serde_json::to_value(node).map_err(|e| StorageError::Serialization {
+        key: key.to_string(),
+        message: e.to_string(),
+    })
+}
+
+#[async_trait]
 impl NodeStoreTrait for NodeStore {
-    fn get_all_nodes(&self) -> HashMap<String, Node> {
-        self.data
-            .get_all()
-            .into_iter()
-            .filter_map(|(id, value)| {
-                serde_json::from_value::<Node>(value)
-                    .ok()
-                    .map(|node| (id, node))
-            })
-            .collect()
+    async fn get_all_nodes(&self) -> StorageResult<HashMap<String, Node>> {
+        let raw = self.data.get_all().await?;
+        let mut out = HashMap::with_capacity(raw.len());
+        for (id, value) in raw {
+            // Skip backward-reference rows; they are not Node-shaped.
+            if id.starts_with("__outgoing__") {
+                continue;
+            }
+            if let Ok(node) = serde_json::from_value::<Node>(value) {
+                out.insert(id, node);
+            }
+        }
+        Ok(out)
     }
 
-    fn get_nodes(&self, ids: &[String]) -> HashMap<String, Node> {
-        self.data
-            .mget(&ids.iter().map(|s| s.to_string()).collect::<Vec<String>>())
-            .into_iter()
-            .filter_map(|(id, value)| {
-                serde_json::from_value::<Node>(value)
-                    .ok()
-                    .map(|node| (id.clone(), node))
-            })
-            .collect()
+    async fn get_nodes(&self, ids: &[String]) -> StorageResult<HashMap<String, Node>> {
+        let raw = self
+            .data
+            .mget(ids)
+            .await?;
+        let mut out = HashMap::with_capacity(raw.len());
+        for (id, value) in raw {
+            let node = serde_json::from_value::<Node>(value).map_err(|e| {
+                StorageError::Deserialization {
+                    key: id.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            out.insert(id, node);
+        }
+        Ok(out)
     }
 
-    fn set_node(&self, id: &str, node: Node) {
+    async fn set_node(&self, id: &str, node: Node) -> StorageResult<()> {
+        // Children referenced by the *new* node, used both to rewrite
+        // backward-reference rows and to detect which previous children
+        // (if any) have become stale.
+        let new_children: HashSet<String> = match &node {
+            Node::Primitive(_) => HashSet::new(),
+            Node::Composite(c) => c
+                .coefficients
+                .iter()
+                .map(|(coef_id, _)| coef_id.clone())
+                .collect(),
+        };
+
+        // If we're overwriting an existing composite, drop `id` from any of
+        // its previous children that are not also referenced by the new
+        // node — otherwise their `__outgoing__<child>` rows keep pointing
+        // at us and `get_parent_ids` returns phantom edges.
+        if let Some(prev_value) = self.data.get(id).await? {
+            if let Ok(Node::Composite(prev)) = serde_json::from_value::<Node>(prev_value) {
+                let stale: Vec<String> = prev
+                    .coefficients
+                    .iter()
+                    .map(|(coef_id, _)| coef_id.clone())
+                    .filter(|coef_id| !new_children.contains(coef_id))
+                    .collect();
+                self.remove_outgoing(&stale, id).await?;
+            }
+        }
+
         match node {
             Node::Primitive(p) => {
-                // Insert the primitive variable as a node
-                let value = serde_json::to_value(Node::Primitive(p)).unwrap();
-                self.data.set(id, value);
+                let value = to_value_for(id, &Node::Primitive(p))?;
+                self.data.set(id, value).await?;
             }
             Node::Composite(c) => {
-                let value = serde_json::to_value(&Node::Composite(c.clone())).unwrap();
-                self.data.set(id, value);
+                let value = to_value_for(id, &Node::Composite(c.clone()))?;
+                self.data.set(id, value).await?;
 
-                // Update outgoing references for this composite node
-                // For each coefficient variable, add this id as an incoming reference
+                // Update outgoing references for this composite node.
+                // For each coefficient variable, add this id as an incoming reference.
                 let coef_ids: Vec<String> = c
                     .coefficients
                     .iter()
                     .map(|(coef_id, _)| coef_id.to_string())
                     .collect();
-                let mut coefficient_current_references  = self.get_parent_ids(&coef_ids);
+                let mut coefficient_current_references = self.get_parent_ids(&coef_ids).await?;
 
                 for (coef_id, current_references) in coefficient_current_references.iter_mut() {
                     if !current_references.contains(&id.to_string()) {
                         current_references.push(id.to_string());
-                        self.data.set(
-                            &format!("__outgoing__{}", coef_id),
-                            serde_json::to_value(current_references).unwrap(),
-                        );
+                        let key = format!("__outgoing__{}", coef_id);
+                        let serialized = serde_json::to_value(&current_references).map_err(|e| {
+                            StorageError::Serialization {
+                                key: key.clone(),
+                                message: e.to_string(),
+                            }
+                        })?;
+                        self.data.set(&key, serialized).await?;
                     }
                 }
             }
         }
+        Ok(())
     }
 
-    fn set_primitives(&self, primitives: &[(&str, &Bound)]) {
-        let kv_pairs = primitives
+    async fn set_primitives(&self, primitives: &[(&str, &Bound)]) -> StorageResult<()> {
+        let mut kv_pairs = Vec::with_capacity(primitives.len());
+        for (id, &bound) in primitives.iter() {
+            let value = to_value_for(id, &Node::Primitive(bound))?;
+            kv_pairs.push((id.to_string(), value));
+        }
+        self.data.mset(&kv_pairs).await?;
+        Ok(())
+    }
+
+    async fn node_exists(&self, id: &str) -> StorageResult<bool> {
+        self.data.exists(id).await
+    }
+
+    async fn node_ids(&self) -> StorageResult<Vec<String>> {
+        let all = self.data.keys().await?;
+        Ok(all
             .into_iter()
-            .map(|(id, &bound)| {
-                (
-                    id.to_string(),
-                    serde_json::to_value(Node::Primitive(bound.clone())).unwrap(),
-                )
-            })
-            .collect::<Vec<(String, serde_json::Value)>>();
-
-        self.data.mset(&kv_pairs);
-    }
-
-    fn node_exists(&self, id: &str) -> bool {
-        self.data.exists(id)
-    }
-
-    fn node_ids(&self) -> Vec<String> {
-        self.data
-            .keys()
-            .iter()
             .filter(|key| !key.starts_with("__outgoing__"))
-            .cloned()
-            .collect()
+            .collect())
     }
 
-    fn delete(&self, id: &str) {
-        // Also remove __outgoing__ references to this node's children
-        if let Some(node_value) = self.data.get(id) {
-            if let Ok(node) = serde_json::from_value::<Node>(node_value) {
-                if let Node::Composite(c) = node {
-                    for (coef_id, _) in c.coefficients {
-                        let mut current_references = self
-                            .get_parent_ids(&[coef_id.clone()])
-                            .get(&coef_id)
-                            .cloned()
-                            .unwrap_or_else(Vec::new);
-                        current_references.retain(|ref_id| ref_id != id);
-                        self.data.set(
-                            &format!("__outgoing__{}", coef_id),
-                            serde_json::to_value(current_references).unwrap(),
-                        );
-                    }
-                }
+    async fn delete(&self, id: &str) -> StorageResult<()> {
+        // Also remove __outgoing__ references to this node's children.
+        if let Some(node_value) = self.data.get(id).await? {
+            if let Ok(Node::Composite(c)) = serde_json::from_value::<Node>(node_value) {
+                let child_ids: Vec<String> = c
+                    .coefficients
+                    .into_iter()
+                    .map(|(coef_id, _)| coef_id)
+                    .collect();
+                self.remove_outgoing(&child_ids, id).await?;
             }
-            self.data.delete(id);
+            self.data.delete(id).await?;
         }
+        Ok(())
     }
 
-    fn get_parent_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>> {
-        // Placeholder implementation
-        let mut result = self
-            .data
-            .mget(
-                &ids.iter()
-                    .map(|id| format!("__outgoing__{}", id))
-                    .collect::<Vec<String>>(),
-            )
-            .into_iter()
-            .map(|(id, refs)| {
-                (
-                    id["__outgoing__".len()..].to_string(),
-                    serde_json::from_value(refs).unwrap_or_else(|_| Vec::new()),
-                )
-            })
-            .collect::<HashMap<String, Vec<String>>>();
+    async fn get_parent_ids(
+        &self,
+        ids: &[String],
+    ) -> StorageResult<HashMap<String, Vec<String>>> {
+        let lookup_keys: Vec<String> = ids
+            .iter()
+            .map(|id| format!("__outgoing__{}", id))
+            .collect();
+        let raw = self.data.mget(&lookup_keys).await?;
 
-        // Ensure all requested ids are present in the result with at least an empty vector
-        ids.iter().for_each(|id| {
-            if !result.contains_key(id) {
-                result.insert(id.clone(), Vec::new());
-            }
-        });
+        let mut result: HashMap<String, Vec<String>> = HashMap::with_capacity(ids.len());
+        for (key, refs) in raw {
+            let original = key["__outgoing__".len()..].to_string();
+            let parsed: Vec<String> = serde_json::from_value(refs).map_err(|e| {
+                StorageError::Deserialization {
+                    key: key.clone(),
+                    message: e.to_string(),
+                }
+            })?;
+            result.insert(original, parsed);
+        }
 
-        result
+        // Ensure all requested ids are present in the result with at least an empty vector.
+        for id in ids {
+            result.entry(id.clone()).or_default();
+        }
+
+        Ok(result)
     }
 
-    fn get_children_ids(&self, ids: &[String]) -> HashMap<String, Vec<String>> {
-        // Placeholder implementation
-        self.data
-            .mget(ids)
-            .into_iter()
-            .map(|(id, val)| {
-                (
-                    id,
-                    match serde_json::from_value::<Node>(val) {
-                        Ok(Node::Composite(c)) => c
-                            .coefficients
-                            .iter()
-                            .map(|(child_id, _)| child_id.clone())
-                            .collect(),
-                        _ => Vec::new(),
-                    },
-                )
-            })
-            .collect::<HashMap<String, Vec<String>>>()
+    async fn get_children_ids(
+        &self,
+        ids: &[String],
+    ) -> StorageResult<HashMap<String, Vec<String>>> {
+        let raw = self.data.mget(ids).await?;
+        let mut out = HashMap::with_capacity(raw.len());
+        for (id, val) in raw {
+            let children = match serde_json::from_value::<Node>(val) {
+                Ok(Node::Composite(c)) => c
+                    .coefficients
+                    .iter()
+                    .map(|(child_id, _)| child_id.clone())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            out.insert(id, children);
+        }
+        Ok(out)
     }
 
     fn get_kv_store(&self) -> &dyn KeyValueStore {
@@ -244,7 +324,10 @@ impl NodeStoreTrait for NodeStore {
     }
 }
 
-/// In-memory storage implementation (for testing/development)
+/// In-memory storage implementation (for testing/development).
+///
+/// Methods are declared `async` to fit the trait, but the bodies are synchronous
+/// (`std::sync::RwLock` under the hood) so they resolve without yielding.
 pub struct InMemoryStore {
     data: RwLock<HashMap<String, Value>>,
 }
@@ -258,63 +341,72 @@ impl InMemoryStore {
     }
 }
 
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
 impl KeyValueStore for InMemoryStore {
-    fn get_all(&self) -> HashMap<String, Value> {
+    async fn get_all(&self) -> StorageResult<HashMap<String, Value>> {
         let data = self.data.read().unwrap();
-        data.clone()
+        Ok(data.clone())
     }
 
-    fn get(&self, key: &str) -> Option<Value> {
+    async fn get(&self, key: &str) -> StorageResult<Option<Value>> {
         let data = self.data.read().unwrap();
-        data.get(key).cloned()
+        Ok(data.get(key).cloned())
     }
 
-    fn set(&self, key: &str, value: Value) {
+    async fn set(&self, key: &str, value: Value) -> StorageResult<()> {
         let mut data = self.data.write().unwrap();
         data.insert(key.to_string(), value);
+        Ok(())
     }
 
-    fn mset(&self, kv_pairs: &[(String, Value)]) {
+    async fn mset(&self, kv_pairs: &[(String, Value)]) -> StorageResult<()> {
         let mut data = self.data.write().unwrap();
         for (key, value) in kv_pairs {
             data.insert(key.to_string(), value.clone());
         }
+        Ok(())
     }
 
-    fn exists(&self, key: &str) -> bool {
+    async fn exists(&self, key: &str) -> StorageResult<bool> {
         let data = self.data.read().unwrap();
-        data.contains_key(key)
+        Ok(data.contains_key(key))
     }
 
-    fn keys(&self) -> Vec<String> {
+    async fn keys(&self) -> StorageResult<Vec<String>> {
         let data = self.data.read().unwrap();
-        data.keys().cloned().collect()
+        Ok(data.keys().cloned().collect())
     }
 
-    fn mget(&self, keys: &[String]) -> HashMap<String, Value> {
+    async fn mget(&self, keys: &[String]) -> StorageResult<HashMap<String, Value>> {
         let data = self.data.read().unwrap();
         let mut result = HashMap::with_capacity(keys.len());
-
         for key in keys {
             if let Some(value) = data.get(key) {
                 result.insert(key.clone(), value.clone());
             }
         }
-
-        result
+        Ok(result)
     }
 
-    fn delete(&self, key: &str) {
+    async fn delete(&self, key: &str) -> StorageResult<()> {
         let mut data = self.data.write().unwrap();
         data.remove(key);
+        Ok(())
     }
 
-    fn get_prefix(&self, prefix: &str) -> HashMap<String, Value> {
+    async fn get_prefix(&self, prefix: &str) -> StorageResult<HashMap<String, Value>> {
         let data = self.data.read().unwrap();
-        data.iter()
+        Ok(data
+            .iter()
             .filter(|(key, _)| key.starts_with(prefix))
             .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+            .collect())
     }
 }
 
@@ -323,67 +415,49 @@ mod tests {
     use super::*;
     use crate::pldag::{Constraint, Node};
 
-    #[test]
-    fn test_delete_removes_backward_references() {
-        // Create a store with composite node that references children
+    #[tokio::test]
+    async fn test_delete_removes_backward_references() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Set up child nodes
-        node_store.set_node("child1", Node::Primitive((0, 1)));
-        node_store.set_node("child2", Node::Primitive((0, 1)));
+        node_store.set_node("child1", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("child2", Node::Primitive((0, 1))).await.unwrap();
 
-        // Create a composite node that references child1 and child2
         let parent = Node::Composite(Constraint {
             coefficients: vec![("child1".to_string(), 2), ("child2".to_string(), 3)],
             bias: (0, 0),
         });
-        node_store.set_node("parent", parent);
+        node_store.set_node("parent", parent).await.unwrap();
 
-        // Verify that backward references were created
-        let parent_ids = node_store.get_parent_ids(&["child1".to_string(), "child2".to_string()]);
-        assert_eq!(
-            parent_ids.get("child1").unwrap(),
-            &vec!["parent".to_string()]
-        );
-        assert_eq!(
-            parent_ids.get("child2").unwrap(),
-            &vec!["parent".to_string()]
-        );
+        let parent_ids = node_store
+            .get_parent_ids(&["child1".to_string(), "child2".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(parent_ids.get("child1").unwrap(), &vec!["parent".to_string()]);
+        assert_eq!(parent_ids.get("child2").unwrap(), &vec!["parent".to_string()]);
 
-        // Delete the parent node
-        node_store.delete("parent");
+        node_store.delete("parent").await.unwrap();
 
-        // Verify that the parent node is deleted
-        assert!(!node_store.node_exists("parent"));
+        assert!(!node_store.node_exists("parent").await.unwrap());
 
-        // Verify that backward references are cleaned up
-        let parent_ids_after =
-            node_store.get_parent_ids(&["child1".to_string(), "child2".to_string()]);
-        assert_eq!(
-            parent_ids_after.get("child1").unwrap(),
-            &Vec::<String>::new()
-        );
-        assert_eq!(
-            parent_ids_after.get("child2").unwrap(),
-            &Vec::<String>::new()
-        );
+        let parent_ids_after = node_store
+            .get_parent_ids(&["child1".to_string(), "child2".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(parent_ids_after.get("child1").unwrap(), &Vec::<String>::new());
+        assert_eq!(parent_ids_after.get("child2").unwrap(), &Vec::<String>::new());
 
-        // Verify that child nodes still exist
-        assert!(node_store.node_exists("child1"));
-        assert!(node_store.node_exists("child2"));
+        assert!(node_store.node_exists("child1").await.unwrap());
+        assert!(node_store.node_exists("child2").await.unwrap());
     }
 
-    #[test]
-    fn test_delete_with_multiple_parents() {
-        // Test that deleting one parent doesn't affect other parents' references
+    #[tokio::test]
+    async fn test_delete_with_multiple_parents() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Set up child node
-        node_store.set_node("child", Node::Primitive((0, 1)));
+        node_store.set_node("child", Node::Primitive((0, 1))).await.unwrap();
 
-        // Create two parent nodes that both reference the same child
         let parent1 = Node::Composite(Constraint {
             coefficients: vec![("child".to_string(), 1)],
             bias: (0, 0),
@@ -392,197 +466,196 @@ mod tests {
             coefficients: vec![("child".to_string(), 2)],
             bias: (0, 0),
         });
-        node_store.set_node("parent1", parent1);
-        node_store.set_node("parent2", parent2);
+        node_store.set_node("parent1", parent1).await.unwrap();
+        node_store.set_node("parent2", parent2).await.unwrap();
 
-        // Verify both parents are in the backward references
-        let parent_ids = node_store.get_parent_ids(&["child".to_string()]);
+        let parent_ids = node_store.get_parent_ids(&["child".to_string()]).await.unwrap();
         let mut parents = parent_ids.get("child").unwrap().clone();
         parents.sort();
         assert_eq!(parents, vec!["parent1".to_string(), "parent2".to_string()]);
 
-        // Delete parent1
-        node_store.delete("parent1");
+        node_store.delete("parent1").await.unwrap();
 
-        // Verify only parent2 remains in backward references
-        let parent_ids_after = node_store.get_parent_ids(&["child".to_string()]);
+        let parent_ids_after = node_store.get_parent_ids(&["child".to_string()]).await.unwrap();
         assert_eq!(
             parent_ids_after.get("child").unwrap(),
             &vec!["parent2".to_string()]
         );
 
-        // Verify parent1 is gone but parent2 still exists
-        assert!(!node_store.node_exists("parent1"));
-        assert!(node_store.node_exists("parent2"));
+        assert!(!node_store.node_exists("parent1").await.unwrap());
+        assert!(node_store.node_exists("parent2").await.unwrap());
     }
 
-    #[test]
-    fn test_delete_primitive_node() {
-        // Test that deleting a primitive node (no children) works
+    #[tokio::test]
+    async fn test_delete_primitive_node() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        node_store.set_node("prim", Node::Primitive((0, 10)));
-        assert!(node_store.node_exists("prim"));
+        node_store.set_node("prim", Node::Primitive((0, 10))).await.unwrap();
+        assert!(node_store.node_exists("prim").await.unwrap());
 
-        node_store.delete("prim");
-        assert!(!node_store.node_exists("prim"));
+        node_store.delete("prim").await.unwrap();
+        assert!(!node_store.node_exists("prim").await.unwrap());
     }
 
-    #[test]
-    fn test_delete_nonexistent_node() {
-        // Test that deleting a nonexistent node doesn't cause issues
+    #[tokio::test]
+    async fn test_delete_nonexistent_node() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Should not panic
-        node_store.delete("nonexistent");
+        node_store.delete("nonexistent").await.unwrap();
     }
 
-    #[test]
-    fn test_set_and_get_nodes() {
+    #[tokio::test]
+    async fn test_set_and_get_nodes() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Set primitive nodes
-        node_store.set_node("prim1", Node::Primitive((0, 5)));
-        node_store.set_node("prim2", Node::Primitive((-10, 10)));
+        node_store.set_node("prim1", Node::Primitive((0, 5))).await.unwrap();
+        node_store.set_node("prim2", Node::Primitive((-10, 10))).await.unwrap();
 
-        // Set composite node
         let composite = Node::Composite(Constraint {
             coefficients: vec![("prim1".to_string(), 2), ("prim2".to_string(), -1)],
             bias: (3, 3),
         });
-        node_store.set_node("comp1", composite.clone());
+        node_store.set_node("comp1", composite.clone()).await.unwrap();
 
-        // Test get_nodes
-        let nodes = node_store.get_nodes(&[
-            "prim1".to_string(),
-            "prim2".to_string(),
-            "comp1".to_string(),
-        ]);
+        let nodes = node_store
+            .get_nodes(&[
+                "prim1".to_string(),
+                "prim2".to_string(),
+                "comp1".to_string(),
+            ])
+            .await
+            .unwrap();
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes.get("prim1").unwrap(), &Node::Primitive((0, 5)));
         assert_eq!(nodes.get("prim2").unwrap(), &Node::Primitive((-10, 10)));
         assert_eq!(nodes.get("comp1").unwrap(), &composite);
 
-        // Test get_nodes with missing id
-        let nodes = node_store.get_nodes(&["prim1".to_string(), "nonexistent".to_string()]);
+        let nodes = node_store
+            .get_nodes(&["prim1".to_string(), "nonexistent".to_string()])
+            .await
+            .unwrap();
         assert_eq!(nodes.len(), 1);
         assert!(nodes.contains_key("prim1"));
         assert!(!nodes.contains_key("nonexistent"));
     }
 
-    #[test]
-    fn test_get_all_nodes() {
+    #[tokio::test]
+    async fn test_get_all_nodes() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Empty store
-        let all_nodes = node_store.get_all_nodes();
+        let all_nodes = node_store.get_all_nodes().await.unwrap();
         assert_eq!(all_nodes.len(), 0);
 
-        // Add some nodes
-        node_store.set_node("a", Node::Primitive((0, 1)));
-        node_store.set_node("b", Node::Primitive((0, 2)));
-        node_store.set_node(
-            "c",
-            Node::Composite(Constraint {
-                coefficients: vec![("a".to_string(), 1)],
-                bias: (0, 0),
-            }),
-        );
+        node_store.set_node("a", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("b", Node::Primitive((0, 2))).await.unwrap();
+        node_store
+            .set_node(
+                "c",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        let all_nodes = node_store.get_all_nodes();
+        let all_nodes = node_store.get_all_nodes().await.unwrap();
         assert_eq!(all_nodes.len(), 3);
         assert!(all_nodes.contains_key("a"));
         assert!(all_nodes.contains_key("b"));
         assert!(all_nodes.contains_key("c"));
 
-        // Verify __outgoing__ keys are not included
         assert!(!all_nodes.iter().any(|(k, _)| k.starts_with("__outgoing__")));
     }
 
-    #[test]
-    fn test_node_exists() {
+    #[tokio::test]
+    async fn test_node_exists() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        assert!(!node_store.node_exists("test"));
+        assert!(!node_store.node_exists("test").await.unwrap());
 
-        node_store.set_node("test", Node::Primitive((0, 1)));
-        assert!(node_store.node_exists("test"));
+        node_store.set_node("test", Node::Primitive((0, 1))).await.unwrap();
+        assert!(node_store.node_exists("test").await.unwrap());
 
-        node_store.delete("test");
-        assert!(!node_store.node_exists("test"));
+        node_store.delete("test").await.unwrap();
+        assert!(!node_store.node_exists("test").await.unwrap());
     }
 
-    #[test]
-    fn test_node_ids() {
+    #[tokio::test]
+    async fn test_node_ids() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Empty store
-        let ids = node_store.node_ids();
+        let ids = node_store.node_ids().await.unwrap();
         assert_eq!(ids.len(), 0);
 
-        // Add nodes
-        node_store.set_node("node1", Node::Primitive((0, 1)));
-        node_store.set_node("node2", Node::Primitive((0, 2)));
-        node_store.set_node(
-            "parent",
-            Node::Composite(Constraint {
-                coefficients: vec![("node1".to_string(), 1), ("node2".to_string(), 2)],
-                bias: (0, 0),
-            }),
-        );
+        node_store.set_node("node1", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("node2", Node::Primitive((0, 2))).await.unwrap();
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("node1".to_string(), 1), ("node2".to_string(), 2)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        let mut ids = node_store.node_ids();
+        let mut ids = node_store.node_ids().await.unwrap();
         ids.sort();
         assert_eq!(ids, vec!["node1", "node2", "parent"]);
 
-        // Verify __outgoing__ keys are filtered out
         assert!(!ids.iter().any(|id| id.starts_with("__outgoing__")));
     }
 
-    #[test]
-    fn test_get_parent_ids() {
+    #[tokio::test]
+    async fn test_get_parent_ids() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Create children
-        node_store.set_node("child1", Node::Primitive((0, 1)));
-        node_store.set_node("child2", Node::Primitive((0, 1)));
-        node_store.set_node("child3", Node::Primitive((0, 1)));
+        node_store.set_node("child1", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("child2", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("child3", Node::Primitive((0, 1))).await.unwrap();
 
-        // No parents yet
-        let parent_ids = node_store.get_parent_ids(&["child1".to_string()]);
+        let parent_ids = node_store.get_parent_ids(&["child1".to_string()]).await.unwrap();
         assert_eq!(parent_ids.get("child1").unwrap(), &Vec::<String>::new());
 
-        // Create parent that references child1 and child2
-        node_store.set_node(
-            "parent1",
-            Node::Composite(Constraint {
-                coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
-                bias: (0, 0),
-            }),
-        );
+        node_store
+            .set_node(
+                "parent1",
+                Node::Composite(Constraint {
+                    coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        // Create another parent that references child1 and child3
-        node_store.set_node(
-            "parent2",
-            Node::Composite(Constraint {
-                coefficients: vec![("child1".to_string(), 3), ("child3".to_string(), 4)],
-                bias: (0, 0),
-            }),
-        );
+        node_store
+            .set_node(
+                "parent2",
+                Node::Composite(Constraint {
+                    coefficients: vec![("child1".to_string(), 3), ("child3".to_string(), 4)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        // Test get_parent_ids
-        let parent_ids = node_store.get_parent_ids(&[
-            "child1".to_string(),
-            "child2".to_string(),
-            "child3".to_string(),
-        ]);
+        let parent_ids = node_store
+            .get_parent_ids(&[
+                "child1".to_string(),
+                "child2".to_string(),
+                "child3".to_string(),
+            ])
+            .await
+            .unwrap();
 
         let mut child1_parents = parent_ids.get("child1").unwrap().clone();
         child1_parents.sort();
@@ -591,50 +664,51 @@ mod tests {
         assert_eq!(parent_ids.get("child2").unwrap(), &vec!["parent1"]);
         assert_eq!(parent_ids.get("child3").unwrap(), &vec!["parent2"]);
 
-        // Test with non-existent child
-        let parent_ids = node_store.get_parent_ids(&["nonexistent".to_string()]);
-        assert_eq!(
-            parent_ids.get("nonexistent").unwrap(),
-            &Vec::<String>::new()
-        );
+        let parent_ids = node_store.get_parent_ids(&["nonexistent".to_string()]).await.unwrap();
+        assert_eq!(parent_ids.get("nonexistent").unwrap(), &Vec::<String>::new());
     }
 
-    #[test]
-    fn test_get_children_ids() {
+    #[tokio::test]
+    async fn test_get_children_ids() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Create primitive nodes (have no children)
-        node_store.set_node("prim", Node::Primitive((0, 1)));
+        node_store.set_node("prim", Node::Primitive((0, 1))).await.unwrap();
 
-        // Create children
-        node_store.set_node("child1", Node::Primitive((0, 1)));
-        node_store.set_node("child2", Node::Primitive((0, 1)));
-        node_store.set_node("child3", Node::Primitive((0, 1)));
+        node_store.set_node("child1", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("child2", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("child3", Node::Primitive((0, 1))).await.unwrap();
 
-        // Create composite nodes with children
-        node_store.set_node(
-            "parent1",
-            Node::Composite(Constraint {
-                coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
-                bias: (0, 0),
-            }),
-        );
+        node_store
+            .set_node(
+                "parent1",
+                Node::Composite(Constraint {
+                    coefficients: vec![("child1".to_string(), 1), ("child2".to_string(), 2)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        node_store.set_node(
-            "parent2",
-            Node::Composite(Constraint {
-                coefficients: vec![("child3".to_string(), 1)],
-                bias: (0, 0),
-            }),
-        );
+        node_store
+            .set_node(
+                "parent2",
+                Node::Composite(Constraint {
+                    coefficients: vec![("child3".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        // Test get_children_ids
-        let children_map = node_store.get_children_ids(&[
-            "prim".to_string(),
-            "parent1".to_string(),
-            "parent2".to_string(),
-        ]);
+        let children_map = node_store
+            .get_children_ids(&[
+                "prim".to_string(),
+                "parent1".to_string(),
+                "parent2".to_string(),
+            ])
+            .await
+            .unwrap();
 
         assert_eq!(children_map.get("prim").unwrap(), &Vec::<String>::new());
         assert_eq!(
@@ -643,99 +717,193 @@ mod tests {
         );
         assert_eq!(children_map.get("parent2").unwrap(), &vec!["child3"]);
 
-        // Test with non-existent node
-        let children_map = node_store.get_children_ids(&["nonexistent".to_string()]);
+        let children_map = node_store.get_children_ids(&["nonexistent".to_string()]).await.unwrap();
         assert_eq!(children_map.len(), 0);
     }
 
-    #[test]
-    fn test_set_node_updates_backward_references() {
+    #[tokio::test]
+    async fn test_set_node_updates_backward_references() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        // Create child
-        node_store.set_node("child", Node::Primitive((0, 1)));
+        node_store.set_node("child", Node::Primitive((0, 1))).await.unwrap();
 
-        // Create parent with one reference to child
-        node_store.set_node(
-            "parent",
-            Node::Composite(Constraint {
-                coefficients: vec![("child".to_string(), 1)],
-                bias: (0, 0),
-            }),
-        );
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("child".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        let parent_ids = node_store.get_parent_ids(&["child".to_string()]);
+        let parent_ids = node_store.get_parent_ids(&["child".to_string()]).await.unwrap();
         assert_eq!(parent_ids.get("child").unwrap(), &vec!["parent"]);
 
-        // Update parent to add another child
-        node_store.set_node("child2", Node::Primitive((0, 1)));
-        node_store.set_node(
-            "parent",
-            Node::Composite(Constraint {
-                coefficients: vec![("child".to_string(), 1), ("child2".to_string(), 2)],
-                bias: (0, 0),
-            }),
-        );
+        node_store.set_node("child2", Node::Primitive((0, 1))).await.unwrap();
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("child".to_string(), 1), ("child2".to_string(), 2)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
 
-        // Verify both children have parent in their references
-        let parent_ids = node_store.get_parent_ids(&["child".to_string(), "child2".to_string()]);
+        let parent_ids = node_store
+            .get_parent_ids(&["child".to_string(), "child2".to_string()])
+            .await
+            .unwrap();
         assert_eq!(parent_ids.get("child").unwrap(), &vec!["parent"]);
         assert_eq!(parent_ids.get("child2").unwrap(), &vec!["parent"]);
     }
 
-    #[test]
-    fn test_set_node_does_not_duplicate_references() {
+    #[tokio::test]
+    async fn test_set_node_does_not_duplicate_references() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
-        node_store.set_node("child", Node::Primitive((0, 1)));
+        node_store.set_node("child", Node::Primitive((0, 1))).await.unwrap();
 
-        // Set same parent node multiple times
         let composite = Node::Composite(Constraint {
             coefficients: vec![("child".to_string(), 1)],
             bias: (0, 0),
         });
 
-        node_store.set_node("parent", composite.clone());
-        node_store.set_node("parent", composite.clone());
-        node_store.set_node("parent", composite.clone());
+        node_store.set_node("parent", composite.clone()).await.unwrap();
+        node_store.set_node("parent", composite.clone()).await.unwrap();
+        node_store.set_node("parent", composite.clone()).await.unwrap();
 
-        // Should only have one reference
-        let parent_ids = node_store.get_parent_ids(&["child".to_string()]);
+        let parent_ids = node_store.get_parent_ids(&["child".to_string()]).await.unwrap();
         assert_eq!(parent_ids.get("child").unwrap(), &vec!["parent"]);
     }
 
-    #[test]
-    fn test_get_kv_store() {
+    #[tokio::test]
+    async fn test_set_node_clears_dropped_children_when_composite_shrinks() {
+        // Overwriting a composite with one whose coefficient set has shrunk
+        // must remove the parent from the dropped child's __outgoing__ row.
+        let store = Arc::new(InMemoryStore::new());
+        let node_store = NodeStore::new(store);
+
+        node_store.set_node("a", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("b", Node::Primitive((0, 1))).await.unwrap();
+
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1), ("b".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Sanity: both children point at parent.
+        let parents = node_store
+            .get_parent_ids(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(parents.get("a").unwrap(), &vec!["parent"]);
+        assert_eq!(parents.get("b").unwrap(), &vec!["parent"]);
+
+        // Rewrite parent to drop "b".
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let parents = node_store
+            .get_parent_ids(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(parents.get("a").unwrap(), &vec!["parent"]);
+        assert!(
+            parents.get("b").map(|v| v.is_empty()).unwrap_or(true),
+            "b's __outgoing__ row should not still list 'parent'; got {:?}",
+            parents.get("b"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_node_clears_all_children_when_composite_replaced_by_primitive() {
+        // Replacing a composite with a primitive must clear *all* of the
+        // previous composite's backward-reference rows.
+        let store = Arc::new(InMemoryStore::new());
+        let node_store = NodeStore::new(store);
+
+        node_store.set_node("a", Node::Primitive((0, 1))).await.unwrap();
+        node_store.set_node("b", Node::Primitive((0, 1))).await.unwrap();
+
+        node_store
+            .set_node(
+                "parent",
+                Node::Composite(Constraint {
+                    coefficients: vec![("a".to_string(), 1), ("b".to_string(), 1)],
+                    bias: (0, 0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Replace the composite with a primitive at the same id.
+        node_store
+            .set_node("parent", Node::Primitive((0, 1)))
+            .await
+            .unwrap();
+
+        let parents = node_store
+            .get_parent_ids(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            parents.get("a").map(|v| v.is_empty()).unwrap_or(true),
+            "a's __outgoing__ row should be empty after parent became primitive; got {:?}",
+            parents.get("a"),
+        );
+        assert!(
+            parents.get("b").map(|v| v.is_empty()).unwrap_or(true),
+            "b's __outgoing__ row should be empty after parent became primitive; got {:?}",
+            parents.get("b"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_kv_store() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store.clone());
 
-        // Test that we can access the underlying store
         let kv_store = node_store.get_kv_store();
 
-        // Set a value directly through the kv store
-        kv_store.set("test_key", serde_json::json!("test_value"));
+        kv_store.set("test_key", serde_json::json!("test_value")).await.unwrap();
 
-        // Verify we can read it back
-        let value = kv_store.get("test_key");
+        let value = kv_store.get("test_key").await.unwrap();
         assert_eq!(value, Some(serde_json::json!("test_value")));
     }
 
-    #[test]
-    fn test_store_method() {
+    #[tokio::test]
+    async fn test_store_method() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store.clone());
 
-        // Test the store() method returns the same interface as get_kv_store()
         let kv_store = node_store.store();
 
-        kv_store.set("key", serde_json::json!(42));
-        assert_eq!(kv_store.get("key"), Some(serde_json::json!(42)));
+        kv_store.set("key", serde_json::json!(42)).await.unwrap();
+        assert_eq!(kv_store.get("key").await.unwrap(), Some(serde_json::json!(42)));
     }
 
-    #[test]
-    fn test_set_primitives() {
+    #[tokio::test]
+    async fn test_set_primitives() {
         let store = Arc::new(InMemoryStore::new());
         let node_store = NodeStore::new(store);
 
@@ -746,17 +914,18 @@ mod tests {
         ];
 
         let primitives_ref: Vec<(&str, &Bound)> = primitives.iter().map(|(s, b)| (*s, b)).collect();
-        node_store.set_primitives(&primitives_ref);
+        node_store.set_primitives(&primitives_ref).await.unwrap();
 
-        // Verify that all primitives were set correctly
-        let nodes = node_store.get_nodes(&["prim1".to_string(), "prim2".to_string(), "prim3".to_string()]);
+        let nodes = node_store
+            .get_nodes(&["prim1".to_string(), "prim2".to_string(), "prim3".to_string()])
+            .await
+            .unwrap();
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes.get("prim1").unwrap(), &Node::Primitive((0, 1)));
         assert_eq!(nodes.get("prim2").unwrap(), &Node::Primitive((-5, 5)));
         assert_eq!(nodes.get("prim3").unwrap(), &Node::Primitive((10, 20)));
 
-        // Verify using get_all_nodes as well
-        let all_nodes = node_store.get_all_nodes();
+        let all_nodes = node_store.get_all_nodes().await.unwrap();
         assert_eq!(all_nodes.len(), 3);
         assert_eq!(all_nodes.get("prim1").unwrap(), &Node::Primitive((0, 1)));
     }
