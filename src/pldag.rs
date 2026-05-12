@@ -1152,6 +1152,29 @@ impl CompiledDag {
         }
         Ok(out)
     }
+
+    /// Propagate many assignment sets against the same DAG, reusing a single
+    /// internal [`Scratch`] across iterations.
+    ///
+    /// Equivalent to calling [`CompiledDag::propagate`] in a loop, but allocates
+    /// the working buffers once instead of per call. Fails fast: returns
+    /// `Err` on the first set that produces a [`ComputeError`], discarding
+    /// any earlier results.
+    pub fn propagate_many<K, I, J>(
+        &self,
+        assignment_sets: J,
+    ) -> ComputeResult<Vec<HashMap<String, Bound>>>
+    where
+        K: ToString,
+        I: IntoIterator<Item = (K, Bound)>,
+        J: IntoIterator<Item = I>,
+    {
+        let mut scratch = Scratch::new();
+        assignment_sets
+            .into_iter()
+            .map(|a| self.propagate_with_scratch(a, &mut scratch))
+            .collect()
+    }
 }
 
 /// A Primitive Logic Directed Acyclic Graph (PL-DAG).
@@ -2510,6 +2533,43 @@ mod tests {
         let baseline = small_dag.propagate(a3).unwrap();
         assert_eq!(with, baseline);
         assert_eq!(with.get(&small_root).unwrap(), &(0, 0));
+    }
+
+    #[tokio::test]
+    async fn test_propagate_many_matches_repeated_propagate() {
+        // propagate_many must produce the same result, in order, as repeated
+        // standalone propagate calls — and propagate the first error eagerly.
+        let model = Pldag::new();
+        let _ = model.set_primitive("x", (0, 1)).await;
+        let _ = model.set_primitive("y", (0, 1)).await;
+        let root = model.set_or(vec!["x", "y"]).await.unwrap();
+        let dag = model.dag().await.unwrap();
+
+        let sets: Vec<Vec<(&str, Bound)>> = vec![
+            vec![("x", (1, 1))],
+            vec![("x", (0, 0)), ("y", (0, 0))],
+            vec![("y", (1, 1))],
+        ];
+
+        let many = dag.propagate_many(sets.clone()).unwrap();
+        let one_by_one: Vec<_> = sets
+            .iter()
+            .map(|s| dag.propagate(s.clone()).unwrap())
+            .collect();
+        assert_eq!(many, one_by_one);
+        assert_eq!(many[0][&root], (1, 1));
+        assert_eq!(many[1][&root], (0, 0));
+        assert_eq!(many[2][&root], (1, 1));
+
+        // Fail-fast: an out-of-bounds assignment surfaces as Err on that set,
+        // and downstream sets are not returned.
+        let bad_sets: Vec<Vec<(&str, Bound)>> = vec![
+            vec![("x", (1, 1))],
+            vec![("x", (2, 2))], // out of (0, 1)
+            vec![("y", (1, 1))],
+        ];
+        let err = dag.propagate_many(bad_sets).unwrap_err();
+        assert!(matches!(err, ComputeError::NodeOutOfBounds { .. }));
     }
 
     /// XOR already covered; test the OR gate
