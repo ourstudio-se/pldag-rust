@@ -1189,6 +1189,7 @@ pub struct Pldag {
     /// Store for mapping node IDs to their corresponding nodes, supporting multiple access patterns
     pub storage: Arc<dyn NodeStoreTrait>,
     validate_coeffs: bool,
+    allow_empty_constraints: bool,
 }
 
 impl Default for Pldag {
@@ -1206,6 +1207,7 @@ impl Pldag {
         Pldag {
             storage: Arc::new(NodeStore::new(Arc::new(InMemoryStore::new()))),
             validate_coeffs: true,
+            allow_empty_constraints: false,
         }
     }
 
@@ -1214,7 +1216,11 @@ impl Pldag {
     /// Use this to plug in a database-backed or otherwise-customised storage
     /// layer instead of the default in-memory store.
     pub fn new_custom(storage: Arc<dyn NodeStoreTrait>) -> Pldag {
-        Pldag { storage, validate_coeffs: true }
+        Pldag {
+            storage,
+            validate_coeffs: true,
+            allow_empty_constraints: false,
+        }
     }
 
     /// Sets whether to validate that coefficients exists on insertion, guaranteeing a valid DAG, at the
@@ -1222,6 +1228,23 @@ impl Pldag {
     /// Default value is true.
     pub fn set_validate_coeffs(mut self, validate_coeffs: bool) -> Self {
         self.validate_coeffs = validate_coeffs;
+        self
+    }
+
+    /// Sets whether to allow constraints with no coefficient variables.
+    ///
+    /// An empty constraint reduces to the constant `bias >= 0`, which is either
+    /// a tautology (when `bias >= 0`) or unsatisfiable (when `bias < 0`). Such
+    /// constraints carry no information about other variables and are typically
+    /// the result of an upstream bug (e.g. accidentally passing an empty
+    /// reference list to `set_and` / `set_atleast`), so this is disabled by
+    /// default and `set_gelineq` returns [`ModelError::EmptyConstraint`].
+    ///
+    /// Enable this if you intentionally rely on the old behaviour of building
+    /// degenerate constraints (e.g. `set_and(vec![])` as a tautology).
+    /// Default value is false.
+    pub fn set_allow_empty_constraints(mut self, allow_empty_constraints: bool) -> Self {
+        self.allow_empty_constraints = allow_empty_constraints;
         self
     }
 
@@ -1933,8 +1956,15 @@ impl Pldag {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
 
-        // Require at least one coefficient to prevent empty constraints
-        if unique_coefficients.len() == 0 {
+        // Drop entries whose summed coefficient is zero: they contribute
+        // nothing to the inequality, would leak irrelevant variables into the
+        // node hash, and would otherwise bypass the empty-constraint guard
+        // below.
+        unique_coefficients.retain(|_, coef| *coef != 0);
+
+        // Require at least one coefficient to prevent empty constraints, unless
+        // the model has been configured to allow them (the old behaviour).
+        if unique_coefficients.is_empty() && !self.allow_empty_constraints {
             return Err(ModelError::EmptyConstraint);
         }
 
@@ -3020,6 +3050,74 @@ mod tests {
         let model = Pldag::new();
         let result = model.set_gelineq(Vec::<(&str, i32)>::new(), 0).await;
         assert!(matches!(result, Err(ModelError::EmptyConstraint)));
+    }
+
+    #[tokio::test]
+    async fn test_zero_summed_coefficients_treated_as_empty() {
+        // Duplicate coefficients that sum to zero (e.g. (x, 1) + (x, -1)) must
+        // collapse to an empty coefficient set so the empty-constraint guard
+        // fires and irrelevant variables don't leak into the node hash.
+        let model = Pldag::new();
+        model.set_primitive("x", (0, 1)).await.unwrap();
+
+        let result = model
+            .set_gelineq(vec![("x", 1), ("x", -1)], 0)
+            .await;
+        assert!(
+            matches!(result, Err(ModelError::EmptyConstraint)),
+            "coefficients summing to zero must be filtered before the empty check",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zero_summed_coefficients_do_not_affect_hash() {
+        // After filtering out zero-valued entries, a constraint built with
+        // (x, 1) + (x, -1) + (y, 1) must hash to the same id as one built with
+        // just (y, 1) — the cancelled variable should not leak into the id.
+        let model = Pldag::new();
+        model.set_primitive("x", (0, 1)).await.unwrap();
+        model.set_primitive("y", (0, 1)).await.unwrap();
+
+        let with_cancel = model
+            .set_gelineq(vec![("x", 1), ("x", -1), ("y", 1)], 0)
+            .await
+            .expect("constraint with cancelling coefficients should succeed");
+        let without_cancel = model
+            .set_gelineq(vec![("y", 1)], 0)
+            .await
+            .expect("plain constraint should succeed");
+
+        assert_eq!(
+            with_cancel, without_cancel,
+            "zero-summed coefficients must not influence the constraint id",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_constraint_allowed_when_configured() {
+        // When the model is configured to allow empty constraints, set_gelineq
+        // should accept zero coefficients and produce a constant constraint.
+        let model = Pldag::new().set_allow_empty_constraints(true);
+
+        // bias >= 0 → tautology: the resulting node propagates to (1, 1).
+        let taut_id = model
+            .set_gelineq(Vec::<(&str, i32)>::new(), 0)
+            .await
+            .expect("empty constraint should be allowed when configured");
+
+        let dag = model.dag().await.expect("dag should compile");
+        let values = Pldag::tighten(&dag, &HashMap::new()).expect("tighten");
+        assert_eq!(values.get(&taut_id), Some(&(1, 1)));
+
+        // bias < 0 → unsatisfiable: the resulting node propagates to (0, 0).
+        let contra_id = model
+            .set_gelineq(Vec::<(&str, i32)>::new(), -1)
+            .await
+            .expect("empty constraint should be allowed when configured");
+
+        let dag = model.dag().await.expect("dag should compile");
+        let values = Pldag::tighten(&dag, &HashMap::new()).expect("tighten");
+        assert_eq!(values.get(&contra_id), Some(&(0, 0)));
     }
 
     #[tokio::test]
