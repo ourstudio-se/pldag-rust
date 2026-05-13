@@ -2114,7 +2114,7 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
         let length = unique_references.len();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()), length as i32).await
+        self.set_atleast(unique_references, length as i32).await
     }
 
     /// Creates a logical OR constraint.
@@ -2133,7 +2133,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atleast(unique_references.iter().map(|x| x.as_str()), 1).await
+        self.set_atleast(unique_references, 1).await
     }
 
     /// Creates a logical OPTIONAL constraint.
@@ -2153,7 +2153,7 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
         let len = unique_references.len() as i32;
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()), len).await
+        self.set_atmost(unique_references, len).await
     }
 
     /// Creates a logical NAND constraint.
@@ -2173,10 +2173,7 @@ impl Pldag {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
         let length = unique_references.len();
-        self.set_atmost(
-            unique_references.iter().map(|x| x.as_str()),
-            length as i32 - 1,
-        ).await
+        self.set_atmost(unique_references, length as i32 - 1).await
     }
 
     /// Creates a logical NOR constraint.
@@ -2195,7 +2192,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0).await
+        self.set_atmost(unique_references, 0).await
     }
 
     /// Creates a logical NOT constraint.
@@ -2214,7 +2211,7 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0).await
+        self.set_atmost(unique_references, 0).await
     }
 
     /// Creates a logical XOR constraint.
@@ -2233,8 +2230,8 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        let atleast = self.set_or(unique_references.iter().map(|x| x.as_str())).await?;
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 1).await?;
+        let atleast = self.set_or(unique_references.clone()).await?;
+        let atmost = self.set_atmost(unique_references, 1).await?;
         self.set_and(vec![atleast, atmost]).await
     }
 
@@ -2254,8 +2251,8 @@ impl Pldag {
     {
         let unique_references: IndexSet<String> =
             references.into_iter().map(|x| x.to_string()).collect();
-        let atleast = self.set_atleast(unique_references.iter().map(|x| x.as_str()), 2).await?;
-        let atmost = self.set_atmost(unique_references.iter().map(|x| x.as_str()), 0).await?;
+        let atleast = self.set_atleast(unique_references.clone(), 2).await?;
+        let atmost = self.set_atmost(unique_references, 0).await?;
         self.set_or(vec![atleast, atmost]).await
     }
 
