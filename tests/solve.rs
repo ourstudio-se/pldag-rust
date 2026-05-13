@@ -1443,6 +1443,44 @@ mod glpk_tests {
     }
 
     #[tokio::test]
+    async fn test_solve_empty_constraint_when_allowed() {
+        // When the model is configured to allow empty constraints, set_gelineq
+        // with no coefficients produces a constant node. A bias >= 0 gives a
+        // tautology that the solver should satisfy, while bias < 0 gives a
+        // contradiction that becomes infeasible once we force the node TRUE.
+        let model = Pldag::new().set_allow_empty_constraints(true);
+        model.set_primitive("x", (0, 1)).await.unwrap();
+
+        let taut = model.set_gelineq(Vec::<(&str, i32)>::new(), 0).await.unwrap();
+        let contra = model.set_gelineq(Vec::<(&str, i32)>::new(), -1).await.unwrap();
+
+        // The tautology should be forced to 1 in any feasible assignment, even
+        // when wired up alongside a real primitive.
+        let root = model.set_and(vec![taut.as_str(), "x"]).await.unwrap();
+        let dag = model.sub_dag(vec![]).await.unwrap();
+
+        let mut assume = HashMap::<&str, Bound>::new();
+        assume.insert(root.as_str(), (1, 1));
+        let solutions = solve(&dag, vec![HashMap::<&str, f64>::new()], assume, true).unwrap();
+        let solution = solutions[0]
+            .as_ref()
+            .expect("tautology AND x must be feasible");
+        assert_eq!(*solution.get(taut.as_str()).unwrap(), (1, 1));
+        assert_eq!(*solution.get("x").unwrap(), (1, 1));
+        assert_eq!(*solution.get(root.as_str()).unwrap(), (1, 1));
+
+        // The contradiction can never be 1, so assuming it true yields no
+        // feasible solution.
+        let mut assume = HashMap::<&str, Bound>::new();
+        assume.insert(contra.as_str(), (1, 1));
+        let solutions = solve(&dag, vec![HashMap::<&str, f64>::new()], assume, true).unwrap();
+        assert!(
+            solutions[0].is_none(),
+            "forcing the contradiction TRUE must be infeasible"
+        );
+    }
+
+    #[tokio::test]
     async fn test_solve_atmost_tautology() {
         let model = Pldag::new();
         model.set_primitive("x", (0, 1)).await.unwrap();
