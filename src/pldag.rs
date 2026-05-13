@@ -1956,6 +1956,12 @@ impl Pldag {
             *unique_coefficients.entry(key.to_string()).or_insert(0) += value;
         }
 
+        // Drop entries whose summed coefficient is zero: they contribute
+        // nothing to the inequality, would leak irrelevant variables into the
+        // node hash, and would otherwise bypass the empty-constraint guard
+        // below.
+        unique_coefficients.retain(|_, coef| *coef != 0);
+
         // Require at least one coefficient to prevent empty constraints, unless
         // the model has been configured to allow them (the old behaviour).
         if unique_coefficients.is_empty() && !self.allow_empty_constraints {
@@ -3044,6 +3050,47 @@ mod tests {
         let model = Pldag::new();
         let result = model.set_gelineq(Vec::<(&str, i32)>::new(), 0).await;
         assert!(matches!(result, Err(ModelError::EmptyConstraint)));
+    }
+
+    #[tokio::test]
+    async fn test_zero_summed_coefficients_treated_as_empty() {
+        // Duplicate coefficients that sum to zero (e.g. (x, 1) + (x, -1)) must
+        // collapse to an empty coefficient set so the empty-constraint guard
+        // fires and irrelevant variables don't leak into the node hash.
+        let model = Pldag::new();
+        model.set_primitive("x", (0, 1)).await.unwrap();
+
+        let result = model
+            .set_gelineq(vec![("x", 1), ("x", -1)], 0)
+            .await;
+        assert!(
+            matches!(result, Err(ModelError::EmptyConstraint)),
+            "coefficients summing to zero must be filtered before the empty check",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zero_summed_coefficients_do_not_affect_hash() {
+        // After filtering out zero-valued entries, a constraint built with
+        // (x, 1) + (x, -1) + (y, 1) must hash to the same id as one built with
+        // just (y, 1) — the cancelled variable should not leak into the id.
+        let model = Pldag::new();
+        model.set_primitive("x", (0, 1)).await.unwrap();
+        model.set_primitive("y", (0, 1)).await.unwrap();
+
+        let with_cancel = model
+            .set_gelineq(vec![("x", 1), ("x", -1), ("y", 1)], 0)
+            .await
+            .expect("constraint with cancelling coefficients should succeed");
+        let without_cancel = model
+            .set_gelineq(vec![("y", 1)], 0)
+            .await
+            .expect("plain constraint should succeed");
+
+        assert_eq!(
+            with_cancel, without_cancel,
+            "zero-summed coefficients must not influence the constraint id",
+        );
     }
 
     #[tokio::test]
